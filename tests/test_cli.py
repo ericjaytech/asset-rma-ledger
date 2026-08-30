@@ -935,3 +935,60 @@ def test_export_command_publishes_a_csv_bundle(
     assert f"Exported ledger bundle: {output}" in captured.out
     assert (output / "vendors.csv").is_file()
     assert (output / "export_manifest.json").is_file()
+
+
+def test_verify_command_reports_a_valid_empty_ledger(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    database_path = tmp_path / "team-assets.db"
+    assert main(["--database", str(database_path), "init"]) == 0
+
+    assert main(["--database", str(database_path), "verify"]) == 0
+
+    captured = capsys.readouterr()
+    assert "Verified ledger: 6 checks, 0 cases, 0 events." in captured.out
+    assert captured.err == ""
+
+
+def test_verify_command_returns_integrity_exit_code_for_projection_drift(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from asset_rma_ledger.assets import add_asset
+    from asset_rma_ledger.cases import open_case
+    from asset_rma_ledger.database import connect_database
+    from asset_rma_ledger.vendors import add_vendor
+
+    database_path = tmp_path / "team-assets.db"
+    assert main(["--database", str(database_path), "init"]) == 0
+    connection = connect_database(database_path)
+    try:
+        add_vendor(connection, key="northstar", name="Northstar Repairs")
+        add_asset(
+            connection,
+            tag="LAP-0042",
+            serial="SN-A1B2C3",
+            asset_type="laptop",
+            manufacturer="ExampleCo",
+            model="ProBook-14",
+        )
+        open_case(
+            connection,
+            reference="RMA-2026-001",
+            asset_tag="LAP-0042",
+            vendor_key="northstar",
+            opened_at="2026-08-30T09:00:00Z",
+            operator_alias="ej",
+        )
+        connection.execute(
+            "UPDATE rma_cases SET current_status = 'authorised' WHERE case_reference = ?",
+            ("RMA-2026-001",),
+        )
+    finally:
+        connection.close()
+    capsys.readouterr()
+
+    exit_code = main(["--database", str(database_path), "verify"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 5
+    assert "projection check failed for case RMA-2026-001: current_status" in captured.err

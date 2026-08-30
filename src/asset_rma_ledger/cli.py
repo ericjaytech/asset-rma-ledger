@@ -58,6 +58,7 @@ from .vendors import (
     list_vendors,
     set_vendor_active,
 )
+from .verify import VerificationError, verify_database
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -75,6 +76,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("init", help="Create a new empty ledger database.")
+    commands.add_parser("verify", help="Verify database, history and case projections.")
 
     import_parser = commands.add_parser("import", help="Import new canonical CSV records.")
     import_commands = import_parser.add_subparsers(dest="import_command", required=True)
@@ -321,6 +323,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if arguments.command == "export":
         return _run_export_command(arguments)
+
+    if arguments.command == "verify":
+        return _run_verify_command(arguments)
 
     if arguments.command == "due":
         return _run_due_command(arguments)
@@ -717,6 +722,25 @@ def _run_export_command(arguments: argparse.Namespace) -> int:
     finally:
         connection.close()
     print(f"Exported ledger bundle: {summary.output_dir}")
+    return 0
+
+
+def _run_verify_command(arguments: argparse.Namespace) -> int:
+    try:
+        connection = connect_database(arguments.database)
+    except DatabaseError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 4
+    try:
+        summary = verify_database(connection)
+    except VerificationError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 5
+    finally:
+        connection.close()
+    print(
+        f"Verified ledger: {summary.checks} checks, {summary.cases} cases, {summary.events} events."
+    )
     return 0
 
 
