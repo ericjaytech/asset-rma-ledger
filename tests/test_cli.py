@@ -810,3 +810,85 @@ def test_import_vendor_command_supports_dry_run(
     captured = capsys.readouterr()
     assert "Validated 1 vendors rows." in captured.out
     assert "Imported 1 vendors rows." in captured.out
+
+
+def test_import_case_command_reconstructs_a_snapshot(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    database_path = tmp_path / "team-assets.db"
+    source = tmp_path / "cases.csv"
+    source.write_text(
+        "case_reference,asset_tag,vendor_key,opened_at,status,vendor_reference,response_due_at,resolution_due_at,vendor_responded_at,outbound_dispatched_at,vendor_received_at,return_dispatched_at,returned_at,outcome,closed_at\n"
+        "RMA-2026-001,LAP-0042,northstar,2026-08-30T09:00:00Z,outbound,,,,,2026-08-31T10:00:00Z,,,,,\n",
+        encoding="utf-8",
+    )
+    assert main(["--database", str(database_path), "init"]) == 0
+    assert (
+        main(
+            [
+                "--database",
+                str(database_path),
+                "vendor",
+                "add",
+                "--key",
+                "northstar",
+                "--name",
+                "Northstar Repairs",
+            ]
+        )
+        == 0
+    )
+    assert (
+        main(
+            [
+                "--database",
+                str(database_path),
+                "asset",
+                "add",
+                "--tag",
+                "LAP-0042",
+                "--serial",
+                "SN-A1B2C3",
+                "--type",
+                "laptop",
+                "--manufacturer",
+                "ExampleCo",
+                "--model",
+                "ProBook-14",
+            ]
+        )
+        == 0
+    )
+
+    assert (
+        main(
+            [
+                "--database",
+                str(database_path),
+                "import",
+                "cases",
+                str(source),
+                "--by",
+                "ej",
+            ]
+        )
+        == 0
+    )
+    assert (
+        main(
+            [
+                "--database",
+                str(database_path),
+                "case",
+                "show",
+                "RMA-2026-001",
+                "--history",
+            ]
+        )
+        == 0
+    )
+
+    captured = capsys.readouterr()
+    assert "Imported 1 cases rows." in captured.out
+    assert "Status: outbound" in captured.out
+    assert "outbound_dispatched" in captured.out

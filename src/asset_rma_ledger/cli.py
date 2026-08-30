@@ -38,7 +38,7 @@ from .cases import (
     record_vendor_receipt,
     record_vendor_response,
 )
-from .csvio import CsvImportError, import_assets_csv, import_vendors_csv
+from .csvio import CsvImportError, import_assets_csv, import_cases_csv, import_vendors_csv
 from .database import DatabaseError, connect_database, initialise_database
 from .deadlines import DeadlineError, DeadlineValidationError, DueCase, due_cases
 from .models import Asset, CaseEvent, RmaCase, Vendor
@@ -74,6 +74,7 @@ def build_parser() -> argparse.ArgumentParser:
     for name, help_text in (
         ("vendors", "Import vendor records."),
         ("assets", "Import asset records."),
+        ("cases", "Import reconstructed case snapshots."),
     ):
         command = import_commands.add_parser(name, help=help_text)
         command.add_argument("path", type=Path, help="Canonical CSV input file.")
@@ -665,8 +666,15 @@ def _run_import_command(arguments: argparse.Namespace) -> int:
     try:
         if arguments.import_command == "vendors":
             summary = import_vendors_csv(connection, arguments.path, dry_run=arguments.dry_run)
-        else:
+        elif arguments.import_command == "assets":
             summary = import_assets_csv(connection, arguments.path, dry_run=arguments.dry_run)
+        else:
+            summary = import_cases_csv(
+                connection,
+                arguments.path,
+                operator_alias=arguments.by,
+                dry_run=arguments.dry_run,
+            )
     except CsvImportError as error:
         print(f"error: {error}", file=sys.stderr)
         return 2
