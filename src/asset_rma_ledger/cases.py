@@ -170,6 +170,306 @@ def list_case_events(connection: sqlite3.Connection, reference: str) -> tuple[Ca
     return tuple(_event_from_row(row) for row in rows)
 
 
+def record_vendor_response(
+    connection: sqlite3.Connection,
+    reference: str,
+    *,
+    at: str,
+    operator_alias: str,
+    vendor_reference: str | None = None,
+) -> RmaCase:
+    """Record the first vendor response without changing the lifecycle status."""
+    case = get_case(connection, reference)
+    if case.vendor_responded_at is not None:
+        raise CaseStateError("vendor response has already been recorded")
+    normalised_reference = _validate_optional_text(vendor_reference, "vendor reference", 128)
+    updates: dict[str, str | int | None] = {"vendor_responded_at": _parse_utc_timestamp(at, "at")}
+    if normalised_reference is not None:
+        updates["vendor_reference"] = normalised_reference
+    return _append_milestone(
+        connection,
+        case,
+        at=updates["vendor_responded_at"],
+        operator_alias=operator_alias,
+        event_type="vendor_response_recorded",
+        payload={"vendor_reference": normalised_reference},
+        updates=updates,
+        allowed_statuses=frozenset(
+            {"open", "authorised", "outbound", "with_vendor", "returning", "returned"}
+        ),
+    )
+
+
+def authorise_case(
+    connection: sqlite3.Connection, reference: str, *, at: str, operator_alias: str
+) -> RmaCase:
+    """Move an open case to authorised."""
+    case = get_case(connection, reference)
+    return _append_milestone(
+        connection,
+        case,
+        at=_parse_utc_timestamp(at, "at"),
+        operator_alias=operator_alias,
+        event_type="status_changed",
+        payload={"from_status": "open", "to_status": "authorised"},
+        updates={"current_status": "authorised"},
+        allowed_statuses=frozenset({"open"}),
+    )
+
+
+def dispatch_case(
+    connection: sqlite3.Connection,
+    reference: str,
+    *,
+    at: str,
+    operator_alias: str,
+    carrier: str,
+    tracking: str,
+) -> RmaCase:
+    """Record outbound dispatch and set the associated asset to in_rma."""
+    case = get_case(connection, reference)
+    normalised_carrier = _validate_required_text(carrier, "carrier", 200)
+    normalised_tracking = _validate_required_text(tracking, "tracking", 200)
+    occurred_at = _parse_utc_timestamp(at, "at")
+    return _append_milestone(
+        connection,
+        case,
+        at=occurred_at,
+        operator_alias=operator_alias,
+        event_type="outbound_dispatched",
+        payload={"carrier": normalised_carrier, "tracking": normalised_tracking},
+        updates={"current_status": "outbound", "outbound_dispatched_at": occurred_at},
+        allowed_statuses=frozenset({"authorised"}),
+        asset_status_change=("in_stock_or_deployed", "in_rma"),
+    )
+
+
+def record_vendor_receipt(
+    connection: sqlite3.Connection, reference: str, *, at: str, operator_alias: str
+) -> RmaCase:
+    """Record vendor receipt of an outbound asset."""
+    case = get_case(connection, reference)
+    occurred_at = _parse_utc_timestamp(at, "at")
+    return _append_milestone(
+        connection,
+        case,
+        at=occurred_at,
+        operator_alias=operator_alias,
+        event_type="vendor_receipt_recorded",
+        payload={},
+        updates={"current_status": "with_vendor", "vendor_received_at": occurred_at},
+        allowed_statuses=frozenset({"outbound"}),
+    )
+
+
+def dispatch_return(
+    connection: sqlite3.Connection,
+    reference: str,
+    *,
+    at: str,
+    operator_alias: str,
+    carrier: str,
+    tracking: str,
+) -> RmaCase:
+    """Record dispatch from the vendor back to the IT team."""
+    case = get_case(connection, reference)
+    normalised_carrier = _validate_required_text(carrier, "carrier", 200)
+    normalised_tracking = _validate_required_text(tracking, "tracking", 200)
+    occurred_at = _parse_utc_timestamp(at, "at")
+    return _append_milestone(
+        connection,
+        case,
+        at=occurred_at,
+        operator_alias=operator_alias,
+        event_type="return_dispatched",
+        payload={"carrier": normalised_carrier, "tracking": normalised_tracking},
+        updates={"current_status": "returning", "return_dispatched_at": occurred_at},
+        allowed_statuses=frozenset({"with_vendor"}),
+    )
+
+
+def receive_return(
+    connection: sqlite3.Connection, reference: str, *, at: str, operator_alias: str
+) -> RmaCase:
+    """Record asset return and restore the associated asset to in_stock."""
+    case = get_case(connection, reference)
+    occurred_at = _parse_utc_timestamp(at, "at")
+    return _append_milestone(
+        connection,
+        case,
+        at=occurred_at,
+        operator_alias=operator_alias,
+        event_type="return_received",
+        payload={},
+        updates={"current_status": "returned", "returned_at": occurred_at},
+        allowed_statuses=frozenset({"returning"}),
+        asset_status_change=("in_rma", "in_stock"),
+    )
+
+
+def _append_milestone(
+    connection: sqlite3.Connection,
+    case: RmaCase,
+    *,
+    at: str,
+    operator_alias: str,
+    event_type: str,
+    payload: dict[str, Any],
+    updates: dict[str, str | int | None],
+    allowed_statuses: frozenset[str],
+    asset_status_change: tuple[str, str] | None = None,
+) -> RmaCase:
+    """Append one lifecycle event and update the affected projections atomically."""
+    alias = _validate_identifier(operator_alias, "operator alias")
+    if case.current_status not in allowed_statuses:
+        expected = " or ".join(sorted(allowed_statuses))
+        raise CaseStateError(f"{event_type} requires {expected} status")
+    _validate_event_time(connection, case.id, at)
+
+    with _write_transaction(connection):
+        current = _case_from_row(_select_case_by_id(connection, case.id))
+        if current.current_status not in allowed_statuses:
+            expected = " or ".join(sorted(allowed_statuses))
+            raise CaseStateError(f"{event_type} requires {expected} status")
+        _validate_event_time(connection, current.id, at)
+        sequence, event_hash, recorded_at = _insert_case_event(
+            connection,
+            current,
+            at=at,
+            operator_alias=alias,
+            event_type=event_type,
+            payload=payload,
+        )
+        _update_case_projection(
+            connection,
+            current.id,
+            updates={
+                **updates,
+                "last_event_sequence": sequence,
+                "last_event_hash": event_hash,
+                "updated_at": recorded_at,
+            },
+        )
+        if asset_status_change is not None:
+            _update_asset_lifecycle(connection, current.id, *asset_status_change, recorded_at)
+        row = _select_case_by_id(connection, current.id)
+    return _case_from_row(row)
+
+
+def _insert_case_event(
+    connection: sqlite3.Connection,
+    case: RmaCase,
+    *,
+    at: str,
+    operator_alias: str,
+    event_type: str,
+    payload: dict[str, Any],
+) -> tuple[int, str, str]:
+    sequence = case.last_event_sequence + 1
+    previous_hash = case.last_event_hash
+    if previous_hash is None:
+        raise CaseStateError("case is missing its previous event hash")
+    event_id = str(uuid.uuid4())
+    recorded_at = _utc_now()
+    payload_json = canonical_json(payload)
+    event_hash = calculate_event_hash(
+        case_reference=case.reference,
+        sequence=sequence,
+        event_id=event_id,
+        event_type=event_type,
+        occurred_at=at,
+        recorded_at=recorded_at,
+        operator_alias=operator_alias,
+        payload_json=payload_json,
+        previous_hash=previous_hash,
+    )
+    connection.execute(
+        """
+        INSERT INTO case_events (
+            event_id, case_id, sequence, event_type, occurred_at, recorded_at,
+            operator_alias, payload_json, previous_hash, event_hash
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            event_id,
+            case.id,
+            sequence,
+            event_type,
+            at,
+            recorded_at,
+            operator_alias,
+            payload_json,
+            previous_hash,
+            event_hash,
+        ),
+    )
+    return sequence, event_hash, recorded_at
+
+
+def _update_case_projection(
+    connection: sqlite3.Connection, case_id: int, *, updates: dict[str, str | int | None]
+) -> None:
+    assignments = ", ".join(f"{column} = ?" for column in updates)
+    connection.execute(
+        f"UPDATE rma_cases SET {assignments} WHERE id = ?", [*updates.values(), case_id]
+    )
+
+
+def _update_asset_lifecycle(
+    connection: sqlite3.Connection,
+    case_id: int,
+    expected_status: str,
+    next_status: str,
+    updated_at: str,
+) -> None:
+    if expected_status == "in_stock_or_deployed":
+        cursor = connection.execute(
+            """
+            UPDATE assets SET lifecycle_status = ?, updated_at = ?
+            WHERE id = (SELECT asset_id FROM rma_cases WHERE id = ?)
+            AND lifecycle_status IN ('in_stock', 'deployed')
+            """,
+            (next_status, updated_at, case_id),
+        )
+    else:
+        cursor = connection.execute(
+            """
+            UPDATE assets SET lifecycle_status = ?, updated_at = ?
+            WHERE id = (SELECT asset_id FROM rma_cases WHERE id = ?)
+            AND lifecycle_status = ?
+            """,
+            (next_status, updated_at, case_id, expected_status),
+        )
+    if cursor.rowcount != 1:
+        raise CaseStateError(f"asset lifecycle must be {expected_status} before this milestone")
+
+
+def _validate_event_time(connection: sqlite3.Connection, case_id: int, at: str) -> None:
+    latest = connection.execute(
+        "SELECT occurred_at FROM case_events WHERE case_id = ? ORDER BY sequence DESC LIMIT 1",
+        (case_id,),
+    ).fetchone()
+    if latest is not None and at < latest["occurred_at"]:
+        raise CaseValidationError("event time must not precede the previous case event")
+
+
+def _validate_required_text(value: str, label: str, maximum_length: int) -> str:
+    normalised = value.strip()
+    if not normalised:
+        raise CaseValidationError(f"{label} is required")
+    if len(normalised) > maximum_length:
+        raise CaseValidationError(f"{label} must be at most {maximum_length} characters")
+    if any(ord(character) < 32 or ord(character) == 127 for character in normalised):
+        raise CaseValidationError(f"{label} must not contain control characters")
+    return normalised
+
+
+def _validate_optional_text(value: str | None, label: str, maximum_length: int) -> str | None:
+    if value is None:
+        return None
+    return _validate_required_text(value, label, maximum_length)
+
+
 def _require_case_asset(connection: sqlite3.Connection, tag: str):
     try:
         asset = get_asset(connection, tag)

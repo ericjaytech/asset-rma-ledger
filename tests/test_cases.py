@@ -174,3 +174,140 @@ def test_open_case_rejects_invalid_case_fields(
 
     with pytest.raises(CaseValidationError, match=message):
         open_case(connection, **values)
+
+
+def test_lifecycle_milestones_append_events_and_update_case_and_asset_projections(
+    connection,
+) -> None:
+    from asset_rma_ledger.assets import get_asset
+    from asset_rma_ledger.cases import (
+        authorise_case,
+        dispatch_case,
+        dispatch_return,
+        get_case,
+        list_case_events,
+        open_case,
+        receive_return,
+        record_vendor_receipt,
+        record_vendor_response,
+    )
+
+    _register_vendor_and_asset(connection)
+    open_case(
+        connection,
+        reference="RMA-2026-001",
+        asset_tag="LAP-0042",
+        vendor_key="northstar",
+        opened_at="2026-08-30T09:00:00Z",
+        operator_alias="ej",
+    )
+
+    responded = record_vendor_response(
+        connection,
+        "RMA-2026-001",
+        at="2026-08-30T09:30:00Z",
+        operator_alias="ej",
+        vendor_reference="NS-88421",
+    )
+    authorised = authorise_case(
+        connection, "RMA-2026-001", at="2026-08-30T10:00:00Z", operator_alias="ej"
+    )
+    outbound = dispatch_case(
+        connection,
+        "RMA-2026-001",
+        at="2026-08-31T10:00:00Z",
+        operator_alias="ej",
+        carrier="Example Carrier",
+        tracking="TRACK-OUT-001",
+    )
+    assert get_asset(connection, "LAP-0042").lifecycle_status == "in_rma"
+
+    with_vendor = record_vendor_receipt(
+        connection, "RMA-2026-001", at="2026-09-01T09:00:00Z", operator_alias="ej"
+    )
+    returning = dispatch_return(
+        connection,
+        "RMA-2026-001",
+        at="2026-09-03T12:00:00Z",
+        operator_alias="ej",
+        carrier="Example Carrier",
+        tracking="TRACK-RETURN-001",
+    )
+    returned = receive_return(
+        connection, "RMA-2026-001", at="2026-09-04T09:00:00Z", operator_alias="ej"
+    )
+    events = list_case_events(connection, "RMA-2026-001")
+
+    assert responded.vendor_responded_at == "2026-08-30T09:30:00Z"
+    assert responded.vendor_reference == "NS-88421"
+    assert authorised.current_status == "authorised"
+    assert outbound.current_status == "outbound"
+    assert outbound.outbound_dispatched_at == "2026-08-31T10:00:00Z"
+    assert with_vendor.current_status == "with_vendor"
+    assert returning.current_status == "returning"
+    assert returned.current_status == "returned"
+    assert get_case(connection, "RMA-2026-001") == returned
+    assert get_asset(connection, "LAP-0042").lifecycle_status == "in_stock"
+    assert [event.event_type for event in events] == [
+        "case_opened",
+        "vendor_response_recorded",
+        "status_changed",
+        "outbound_dispatched",
+        "vendor_receipt_recorded",
+        "return_dispatched",
+        "return_received",
+    ]
+    assert [event.sequence for event in events] == list(range(1, 8))
+    assert all(
+        event.previous_hash == events[index - 1].event_hash
+        for index, event in enumerate(events[1:], 1)
+    )
+
+
+def test_milestones_reject_invalid_transitions_and_empty_shipping_data_without_mutation(
+    connection,
+) -> None:
+    from asset_rma_ledger.cases import (
+        CaseStateError,
+        CaseValidationError,
+        authorise_case,
+        dispatch_case,
+        list_case_events,
+        open_case,
+    )
+
+    _register_vendor_and_asset(connection)
+    open_case(
+        connection,
+        reference="RMA-2026-001",
+        asset_tag="LAP-0042",
+        vendor_key="northstar",
+        opened_at="2026-08-30T09:00:00Z",
+        operator_alias="ej",
+    )
+
+    with pytest.raises(CaseStateError, match="requires authorised"):
+        dispatch_case(
+            connection,
+            "RMA-2026-001",
+            at="2026-08-30T10:00:00Z",
+            operator_alias="ej",
+            carrier="Example Carrier",
+            tracking="TRACK-OUT-001",
+        )
+
+    authorise_case(connection, "RMA-2026-001", at="2026-08-30T10:00:00Z", operator_alias="ej")
+    with pytest.raises(CaseValidationError, match="carrier is required"):
+        dispatch_case(
+            connection,
+            "RMA-2026-001",
+            at="2026-08-31T10:00:00Z",
+            operator_alias="ej",
+            carrier="",
+            tracking="TRACK-OUT-001",
+        )
+
+    assert [event.event_type for event in list_case_events(connection, "RMA-2026-001")] == [
+        "case_opened",
+        "status_changed",
+    ]

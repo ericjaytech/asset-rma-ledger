@@ -77,3 +77,27 @@ def test_opening_event_cannot_be_updated_or_deleted(connection) -> None:
         )
     with pytest.raises(Exception, match="append-only"):
         connection.execute("DELETE FROM case_events WHERE event_id = ?", (event.event_id,))
+
+
+def test_lifecycle_events_extend_the_hash_chain_with_canonical_payloads(connection) -> None:
+    from asset_rma_ledger.cases import authorise_case, list_case_events
+    from asset_rma_ledger.events import calculate_event_hash
+
+    _open_case(connection)
+    authorise_case(connection, "RMA-2026-001", at="2026-08-30T10:00:00Z", operator_alias="ej")
+    events = list_case_events(connection, "RMA-2026-001")
+    event = events[-1]
+
+    assert event.payload == {"from_status": "open", "to_status": "authorised"}
+    assert event.previous_hash == events[0].event_hash
+    assert event.event_hash == calculate_event_hash(
+        case_reference="RMA-2026-001",
+        sequence=event.sequence,
+        event_id=event.event_id,
+        event_type=event.event_type,
+        occurred_at=event.occurred_at,
+        recorded_at=event.recorded_at,
+        operator_alias=event.operator_alias,
+        payload_json=event.payload_json,
+        previous_hash=event.previous_hash,
+    )
