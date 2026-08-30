@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .assets import AssetError, add_asset
+from .cases import CaseError, import_case_snapshot
 from .vendors import VendorError, add_vendor, set_vendor_active
 
 _MAX_BYTES = 100 * 1024 * 1024
@@ -36,6 +37,23 @@ _ASSET_FIELDS = (
     "warranty_reference",
     "warranty_start",
     "warranty_end",
+)
+_CASE_FIELDS = (
+    "case_reference",
+    "asset_tag",
+    "vendor_key",
+    "opened_at",
+    "status",
+    "vendor_reference",
+    "response_due_at",
+    "resolution_due_at",
+    "vendor_responded_at",
+    "outbound_dispatched_at",
+    "vendor_received_at",
+    "return_dispatched_at",
+    "returned_at",
+    "outcome",
+    "closed_at",
 )
 
 
@@ -102,6 +120,42 @@ def import_assets_csv(
     except AssetError as error:
         raise CsvImportError(f"row {_number}: {error}") from None
     return ImportSummary("assets", len(rows), dry_run)
+
+
+def import_cases_csv(
+    connection: sqlite3.Connection,
+    path: Path,
+    *,
+    operator_alias: str,
+    dry_run: bool = False,
+) -> ImportSummary:
+    """Import case snapshots as source-marked reconstructed histories."""
+    rows = _read_rows(path, _CASE_FIELDS)
+    try:
+        with _import_transaction(connection, dry_run=dry_run):
+            for _number, row in rows:
+                import_case_snapshot(
+                    connection,
+                    reference=row["case_reference"],
+                    asset_tag=row["asset_tag"],
+                    vendor_key=row["vendor_key"],
+                    opened_at=row["opened_at"],
+                    status=row["status"],
+                    operator_alias=operator_alias,
+                    vendor_reference=_none(row["vendor_reference"]),
+                    response_due_at=_none(row["response_due_at"]),
+                    resolution_due_at=_none(row["resolution_due_at"]),
+                    vendor_responded_at=_none(row["vendor_responded_at"]),
+                    outbound_dispatched_at=_none(row["outbound_dispatched_at"]),
+                    vendor_received_at=_none(row["vendor_received_at"]),
+                    return_dispatched_at=_none(row["return_dispatched_at"]),
+                    returned_at=_none(row["returned_at"]),
+                    outcome=_none(row["outcome"]),
+                    closed_at=_none(row["closed_at"]),
+                )
+    except CaseError as error:
+        raise CsvImportError(f"row {_number}: {error}") from None
+    return ImportSummary("cases", len(rows), dry_run)
 
 
 def _read_rows(path: Path, fields: tuple[str, ...]) -> list[tuple[int, dict[str, str]]]:

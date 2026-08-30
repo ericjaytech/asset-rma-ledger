@@ -63,6 +63,7 @@ def open_case(
     operator_alias: str,
     response_due_at: str | None = None,
     resolution_due_at: str | None = None,
+    _source: str | None = None,
 ) -> RmaCase:
     """Open one RMA case and append its first immutable event atomically."""
     case_reference = _validate_identifier(reference, "case reference")
@@ -84,6 +85,7 @@ def open_case(
         "response_due_at": effective_response_due,
         "vendor_key": vendor.key,
     }
+    payload = _mark_event_source(payload, _source)
     payload_json = canonical_json(payload)
     event_id = str(uuid.uuid4())
     recorded_at = _utc_now()
@@ -186,6 +188,7 @@ def record_vendor_response(
     at: str,
     operator_alias: str,
     vendor_reference: str | None = None,
+    _source: str | None = None,
 ) -> RmaCase:
     """Record the first vendor response without changing the lifecycle status."""
     case = get_case(connection, reference)
@@ -201,7 +204,7 @@ def record_vendor_response(
         at=updates["vendor_responded_at"],
         operator_alias=operator_alias,
         event_type="vendor_response_recorded",
-        payload={"vendor_reference": normalised_reference},
+        payload=_mark_event_source({"vendor_reference": normalised_reference}, _source),
         updates=updates,
         allowed_statuses=frozenset(
             {"open", "authorised", "outbound", "with_vendor", "returning", "returned"}
@@ -210,7 +213,12 @@ def record_vendor_response(
 
 
 def authorise_case(
-    connection: sqlite3.Connection, reference: str, *, at: str, operator_alias: str
+    connection: sqlite3.Connection,
+    reference: str,
+    *,
+    at: str,
+    operator_alias: str,
+    _source: str | None = None,
 ) -> RmaCase:
     """Move an open case to authorised."""
     case = get_case(connection, reference)
@@ -220,7 +228,7 @@ def authorise_case(
         at=_parse_utc_timestamp(at, "at"),
         operator_alias=operator_alias,
         event_type="status_changed",
-        payload={"from_status": "open", "to_status": "authorised"},
+        payload=_mark_event_source({"from_status": "open", "to_status": "authorised"}, _source),
         updates={"current_status": "authorised"},
         allowed_statuses=frozenset({"open"}),
     )
@@ -232,13 +240,13 @@ def dispatch_case(
     *,
     at: str,
     operator_alias: str,
-    carrier: str,
-    tracking: str,
+    carrier: str | None,
+    tracking: str | None,
+    _source: str | None = None,
 ) -> RmaCase:
     """Record outbound dispatch and set the associated asset to in_rma."""
     case = get_case(connection, reference)
-    normalised_carrier = _validate_required_text(carrier, "carrier", 200)
-    normalised_tracking = _validate_required_text(tracking, "tracking", 200)
+    normalised_carrier, normalised_tracking = _validate_shipping(carrier, tracking, _source)
     occurred_at = _parse_utc_timestamp(at, "at")
     return _append_milestone(
         connection,
@@ -246,7 +254,9 @@ def dispatch_case(
         at=occurred_at,
         operator_alias=operator_alias,
         event_type="outbound_dispatched",
-        payload={"carrier": normalised_carrier, "tracking": normalised_tracking},
+        payload=_mark_event_source(
+            {"carrier": normalised_carrier, "tracking": normalised_tracking}, _source
+        ),
         updates={"current_status": "outbound", "outbound_dispatched_at": occurred_at},
         allowed_statuses=frozenset({"authorised"}),
         asset_status_change=("in_stock_or_deployed", "in_rma"),
@@ -254,7 +264,12 @@ def dispatch_case(
 
 
 def record_vendor_receipt(
-    connection: sqlite3.Connection, reference: str, *, at: str, operator_alias: str
+    connection: sqlite3.Connection,
+    reference: str,
+    *,
+    at: str,
+    operator_alias: str,
+    _source: str | None = None,
 ) -> RmaCase:
     """Record vendor receipt of an outbound asset."""
     case = get_case(connection, reference)
@@ -265,7 +280,7 @@ def record_vendor_receipt(
         at=occurred_at,
         operator_alias=operator_alias,
         event_type="vendor_receipt_recorded",
-        payload={},
+        payload=_mark_event_source({}, _source),
         updates={"current_status": "with_vendor", "vendor_received_at": occurred_at},
         allowed_statuses=frozenset({"outbound"}),
     )
@@ -277,13 +292,13 @@ def dispatch_return(
     *,
     at: str,
     operator_alias: str,
-    carrier: str,
-    tracking: str,
+    carrier: str | None,
+    tracking: str | None,
+    _source: str | None = None,
 ) -> RmaCase:
     """Record dispatch from the vendor back to the IT team."""
     case = get_case(connection, reference)
-    normalised_carrier = _validate_required_text(carrier, "carrier", 200)
-    normalised_tracking = _validate_required_text(tracking, "tracking", 200)
+    normalised_carrier, normalised_tracking = _validate_shipping(carrier, tracking, _source)
     occurred_at = _parse_utc_timestamp(at, "at")
     return _append_milestone(
         connection,
@@ -291,14 +306,21 @@ def dispatch_return(
         at=occurred_at,
         operator_alias=operator_alias,
         event_type="return_dispatched",
-        payload={"carrier": normalised_carrier, "tracking": normalised_tracking},
+        payload=_mark_event_source(
+            {"carrier": normalised_carrier, "tracking": normalised_tracking}, _source
+        ),
         updates={"current_status": "returning", "return_dispatched_at": occurred_at},
         allowed_statuses=frozenset({"with_vendor"}),
     )
 
 
 def receive_return(
-    connection: sqlite3.Connection, reference: str, *, at: str, operator_alias: str
+    connection: sqlite3.Connection,
+    reference: str,
+    *,
+    at: str,
+    operator_alias: str,
+    _source: str | None = None,
 ) -> RmaCase:
     """Record asset return and restore the associated asset to in_stock."""
     case = get_case(connection, reference)
@@ -309,7 +331,7 @@ def receive_return(
         at=occurred_at,
         operator_alias=operator_alias,
         event_type="return_received",
-        payload={},
+        payload=_mark_event_source({}, _source),
         updates={"current_status": "returned", "returned_at": occurred_at},
         allowed_statuses=frozenset({"returning"}),
         asset_status_change=("in_rma", "in_stock"),
@@ -371,6 +393,7 @@ def record_case_outcome(
     operator_alias: str,
     outcome: str,
     note: str | None = None,
+    _source: str | None = None,
 ) -> RmaCase:
     """Record the effective outcome that must precede case closure."""
     case = get_case(connection, reference)
@@ -382,6 +405,7 @@ def record_case_outcome(
     payload: dict[str, Any] = {"outcome": normalised_outcome}
     if normalised_note is not None:
         payload["note"] = normalised_note
+    payload = _mark_event_source(payload, _source)
     return _append_milestone(
         connection,
         case,
@@ -473,6 +497,7 @@ def close_case(
     at: str,
     operator_alias: str,
     asset_status: str | None = None,
+    _source: str | None = None,
 ) -> RmaCase:
     """Close a returned case or a documented exceptional case."""
     case = get_case(connection, reference)
@@ -487,11 +512,14 @@ def close_case(
             at=occurred_at,
             operator_alias=operator_alias,
             event_type="case_closed",
-            payload={
-                "asset_status": "in_stock",
-                "closure_type": "returned",
-                "outcome": case.current_outcome,
-            },
+            payload=_mark_event_source(
+                {
+                    "asset_status": "in_stock",
+                    "closure_type": "returned",
+                    "outcome": case.current_outcome,
+                },
+                _source,
+            ),
             updates={"current_status": "closed", "closed_at": occurred_at},
             allowed_statuses=frozenset({"returned"}),
             additional_validation=_require_outcome_present,
@@ -507,11 +535,14 @@ def close_case(
         at=occurred_at,
         operator_alias=operator_alias,
         event_type="case_closed",
-        payload={
-            "asset_status": final_asset_status,
-            "closure_type": "exceptional",
-            "outcome": case.current_outcome,
-        },
+        payload=_mark_event_source(
+            {
+                "asset_status": final_asset_status,
+                "closure_type": "exceptional",
+                "outcome": case.current_outcome,
+            },
+            _source,
+        ),
         updates={"current_status": "closed", "closed_at": occurred_at},
         allowed_statuses=_EXCEPTIONAL_CLOSE_STATUSES,
         asset_status_change=(_asset_status_before_exceptional_close(case), final_asset_status),
@@ -526,6 +557,7 @@ def cancel_case(
     at: str,
     operator_alias: str,
     reason: str,
+    _source: str | None = None,
 ) -> RmaCase:
     """Cancel a case before dispatch without altering its history."""
     case = get_case(connection, reference)
@@ -537,9 +569,331 @@ def cancel_case(
         at=occurred_at,
         operator_alias=operator_alias,
         event_type="case_cancelled",
-        payload={"reason": normalised_reason},
+        payload=_mark_event_source({"reason": normalised_reason}, _source),
         updates={"current_status": "cancelled"},
         allowed_statuses=frozenset({"open", "authorised"}),
+    )
+
+
+def import_case_snapshot(
+    connection: sqlite3.Connection,
+    *,
+    reference: str,
+    asset_tag: str,
+    vendor_key: str,
+    opened_at: str,
+    status: str,
+    operator_alias: str,
+    vendor_reference: str | None = None,
+    response_due_at: str | None = None,
+    resolution_due_at: str | None = None,
+    vendor_responded_at: str | None = None,
+    outbound_dispatched_at: str | None = None,
+    vendor_received_at: str | None = None,
+    return_dispatched_at: str | None = None,
+    returned_at: str | None = None,
+    outcome: str | None = None,
+    closed_at: str | None = None,
+) -> RmaCase:
+    """Reconstruct the minimum standard history represented by one CSV snapshot."""
+    target_status = _validate_import_status(status)
+    opened = _parse_utc_timestamp(opened_at, "opened-at")
+    responded = _parse_optional_utc_timestamp(vendor_responded_at, "vendor responded-at")
+    outbound = _parse_optional_utc_timestamp(outbound_dispatched_at, "outbound dispatched-at")
+    received = _parse_optional_utc_timestamp(vendor_received_at, "vendor received-at")
+    return_dispatched = _parse_optional_utc_timestamp(return_dispatched_at, "return dispatched-at")
+    returned = _parse_optional_utc_timestamp(returned_at, "returned-at")
+    closed = _parse_optional_utc_timestamp(closed_at, "closed-at")
+    normalised_outcome = _validate_outcome(outcome) if outcome is not None else None
+    _validate_import_snapshot(
+        status=target_status,
+        opened_at=opened,
+        vendor_reference=vendor_reference,
+        vendor_responded_at=responded,
+        outbound_dispatched_at=outbound,
+        vendor_received_at=received,
+        return_dispatched_at=return_dispatched,
+        returned_at=returned,
+        outcome=normalised_outcome,
+        closed_at=closed,
+    )
+
+    case = open_case(
+        connection,
+        reference=reference,
+        asset_tag=asset_tag,
+        vendor_key=vendor_key,
+        opened_at=opened,
+        operator_alias=operator_alias,
+        response_due_at=response_due_at,
+        resolution_due_at=resolution_due_at,
+        _source="csv_import",
+    )
+
+    actions: list[tuple[str, int, Callable[[], RmaCase]]] = []
+    if responded is not None:
+        actions.append(
+            (
+                responded,
+                5,
+                lambda: record_vendor_response(
+                    connection,
+                    reference,
+                    at=responded,
+                    operator_alias=operator_alias,
+                    vendor_reference=vendor_reference,
+                    _source="csv_import",
+                ),
+            )
+        )
+
+    lifecycle_rank = {
+        "open": 0,
+        "authorised": 1,
+        "outbound": 2,
+        "with_vendor": 3,
+        "returning": 4,
+        "returned": 5,
+        "closed": 5,
+        "cancelled": 0,
+    }[target_status]
+    authorisation_at = outbound or opened
+    if lifecycle_rank >= 1:
+        actions.append(
+            (
+                authorisation_at,
+                10,
+                lambda: authorise_case(
+                    connection,
+                    reference,
+                    at=authorisation_at,
+                    operator_alias=operator_alias,
+                    _source="csv_import",
+                ),
+            )
+        )
+    if lifecycle_rank >= 2:
+        assert outbound is not None
+        actions.append(
+            (
+                outbound,
+                20,
+                lambda: dispatch_case(
+                    connection,
+                    reference,
+                    at=outbound,
+                    operator_alias=operator_alias,
+                    carrier=None,
+                    tracking=None,
+                    _source="csv_import",
+                ),
+            )
+        )
+    if lifecycle_rank >= 3:
+        assert received is not None
+        actions.append(
+            (
+                received,
+                30,
+                lambda: record_vendor_receipt(
+                    connection,
+                    reference,
+                    at=received,
+                    operator_alias=operator_alias,
+                    _source="csv_import",
+                ),
+            )
+        )
+    if lifecycle_rank >= 4:
+        assert return_dispatched is not None
+        actions.append(
+            (
+                return_dispatched,
+                40,
+                lambda: dispatch_return(
+                    connection,
+                    reference,
+                    at=return_dispatched,
+                    operator_alias=operator_alias,
+                    carrier=None,
+                    tracking=None,
+                    _source="csv_import",
+                ),
+            )
+        )
+    if lifecycle_rank >= 5:
+        assert returned is not None
+        actions.append(
+            (
+                returned,
+                50,
+                lambda: receive_return(
+                    connection,
+                    reference,
+                    at=returned,
+                    operator_alias=operator_alias,
+                    _source="csv_import",
+                ),
+            )
+        )
+
+    latest_snapshot_at = max(
+        timestamp
+        for timestamp in (opened, responded, outbound, received, return_dispatched, returned)
+        if timestamp is not None
+    )
+    if normalised_outcome is not None:
+        actions.append(
+            (
+                latest_snapshot_at,
+                60,
+                lambda: record_case_outcome(
+                    connection,
+                    reference,
+                    at=latest_snapshot_at,
+                    operator_alias=operator_alias,
+                    outcome=normalised_outcome,
+                    _source="csv_import",
+                ),
+            )
+        )
+    if target_status == "closed":
+        assert closed is not None
+        actions.append(
+            (
+                closed,
+                70,
+                lambda: close_case(
+                    connection,
+                    reference,
+                    at=closed,
+                    operator_alias=operator_alias,
+                    _source="csv_import",
+                ),
+            )
+        )
+    elif target_status == "cancelled":
+        assert closed is not None
+        actions.append(
+            (
+                closed,
+                70,
+                lambda: cancel_case(
+                    connection,
+                    reference,
+                    at=closed,
+                    operator_alias=operator_alias,
+                    reason="Imported cancelled snapshot",
+                    _source="csv_import",
+                ),
+            )
+        )
+
+    for _timestamp, _priority, action in sorted(actions, key=lambda item: item[:2]):
+        case = action()
+    return case
+
+
+def _validate_import_status(value: str) -> str:
+    normalised = _validate_required_text(value, "status", 64)
+    statuses = {
+        "open",
+        "authorised",
+        "outbound",
+        "with_vendor",
+        "returning",
+        "returned",
+        "closed",
+        "cancelled",
+    }
+    if normalised not in statuses:
+        raise CaseValidationError(f"status must be one of: {', '.join(sorted(statuses))}")
+    return normalised
+
+
+def _validate_import_snapshot(
+    *,
+    status: str,
+    opened_at: str,
+    vendor_reference: str | None,
+    vendor_responded_at: str | None,
+    outbound_dispatched_at: str | None,
+    vendor_received_at: str | None,
+    return_dispatched_at: str | None,
+    returned_at: str | None,
+    outcome: str | None,
+    closed_at: str | None,
+) -> None:
+    if vendor_reference is not None and vendor_responded_at is None:
+        raise CaseValidationError("vendor reference requires vendor responded-at")
+    lifecycle = (
+        ("outbound dispatched-at", outbound_dispatched_at),
+        ("vendor received-at", vendor_received_at),
+        ("return dispatched-at", return_dispatched_at),
+        ("returned-at", returned_at),
+    )
+    required_count = {
+        "open": 0,
+        "authorised": 0,
+        "outbound": 1,
+        "with_vendor": 2,
+        "returning": 3,
+        "returned": 4,
+        "closed": 4,
+        "cancelled": 0,
+    }[status]
+    for index, (label, timestamp) in enumerate(lifecycle):
+        if index < required_count and timestamp is None:
+            raise CaseValidationError(f"{label} is required for {status} status")
+        if index >= required_count and timestamp is not None:
+            raise CaseValidationError(f"{label} is inconsistent with {status} status")
+
+    timeline = [
+        timestamp
+        for timestamp in (
+            opened_at,
+            outbound_dispatched_at,
+            vendor_received_at,
+            return_dispatched_at,
+            returned_at,
+        )
+        if timestamp is not None
+    ]
+    if timeline != sorted(timeline):
+        raise CaseValidationError("case lifecycle timestamps must be chronological")
+    if vendor_responded_at is not None and vendor_responded_at < opened_at:
+        raise CaseValidationError("vendor responded-at must not precede opened-at")
+    if status in {"closed", "cancelled"}:
+        if closed_at is None:
+            raise CaseValidationError(f"closed-at is required for {status} status")
+        if max(timeline + ([vendor_responded_at] if vendor_responded_at else [])) > closed_at:
+            raise CaseValidationError("closed-at must not precede another snapshot timestamp")
+    elif closed_at is not None:
+        raise CaseValidationError("closed-at is only valid for closed or cancelled status")
+    if status == "closed" and outcome is None:
+        raise CaseValidationError("outcome is required for closed status")
+    if status in {"outbound", "returning", "cancelled"} and outcome is not None:
+        raise CaseValidationError(f"outcome is inconsistent with {status} status")
+
+
+def _mark_event_source(payload: dict[str, Any], source: str | None) -> dict[str, Any]:
+    if source is None:
+        return payload
+    if source != "csv_import":
+        raise CaseValidationError("unsupported event source")
+    return {**payload, "source": source}
+
+
+def _validate_shipping(
+    carrier: str | None, tracking: str | None, source: str | None
+) -> tuple[str | None, str | None]:
+    if source == "csv_import" and carrier is None and tracking is None:
+        return None, None
+    if carrier is None or tracking is None:
+        raise CaseValidationError("carrier and tracking are required")
+    return (
+        _validate_required_text(carrier, "carrier", 200),
+        _validate_required_text(tracking, "tracking", 200),
     )
 
 
