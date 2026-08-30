@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import sys
 from collections.abc import Sequence
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 from . import __version__
@@ -23,6 +23,7 @@ from .cases import (
     CaseError,
     CaseValidationError,
     authorise_case,
+    change_case_deadlines,
     dispatch_case,
     dispatch_return,
     get_case,
@@ -33,6 +34,7 @@ from .cases import (
     record_vendor_response,
 )
 from .database import DatabaseError, connect_database, initialise_database
+from .deadlines import DeadlineError, DeadlineValidationError, DueCase, due_cases
 from .models import Asset, CaseEvent, RmaCase, Vendor
 from .vendors import (
     VendorError,
@@ -60,6 +62,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("init", help="Create a new empty ledger database.")
+
+    due_parser = commands.add_parser(
+        "due", help="List overdue and upcoming incomplete SLA deadlines."
+    )
+    due_parser.add_argument(
+        "--within", required=True, help="Positive elapsed window in whole hours, such as 48h."
+    )
+    due_parser.add_argument(
+        "--as-of", help="UTC RFC 3339 reference timestamp; defaults to the current time."
+    )
 
     vendor_parser = commands.add_parser("vendor", help="Manage vendor records.")
     vendor_commands = vendor_parser.add_subparsers(dest="vendor_command", required=True)
@@ -184,6 +196,18 @@ def build_parser() -> argparse.ArgumentParser:
         "return-received", help="Record return receipt by the IT team."
     )
     _add_case_milestone_arguments(return_received_parser)
+
+    deadline_case_parser = case_commands.add_parser(
+        "deadline", help="Change one or both SLA deadlines with an auditable reason."
+    )
+    _add_case_milestone_arguments(deadline_case_parser)
+    deadline_case_parser.add_argument("--reason", required=True, help="Reason for the change.")
+    deadline_case_parser.add_argument(
+        "--response-due-at", help="Replacement UTC response deadline."
+    )
+    deadline_case_parser.add_argument(
+        "--resolution-due-at", help="Replacement UTC resolution deadline."
+    )
     return parser
 
 
@@ -210,6 +234,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if arguments.command == "asset":
         return _run_asset_command(arguments)
+
+    if arguments.command == "due":
+        return _run_due_command(arguments)
 
     if arguments.command == "case":
         return _run_case_command(arguments)
@@ -458,6 +485,18 @@ def _run_case_command(arguments: argparse.Namespace) -> int:
             )
             print(f"Recorded return receipt: {case.reference}")
             return 0
+        if arguments.case_command == "deadline":
+            case = change_case_deadlines(
+                connection,
+                arguments.reference,
+                at=arguments.at,
+                operator_alias=arguments.operator_alias,
+                reason=arguments.reason,
+                response_due_at=arguments.response_due_at,
+                resolution_due_at=arguments.resolution_due_at,
+            )
+            print(f"Changed case deadlines: {case.reference}")
+            return 0
     except CaseValidationError as error:
         print(f"error: {error}", file=sys.stderr)
         return 2
@@ -468,6 +507,31 @@ def _run_case_command(arguments: argparse.Namespace) -> int:
         connection.close()
 
     raise AssertionError(f"unsupported case command: {arguments.case_command}")
+
+
+def _run_due_command(arguments: argparse.Namespace) -> int:
+    try:
+        within_hours = _parse_due_window(arguments.within)
+        as_of = arguments.as_of or _current_utc_timestamp()
+        connection = connect_database(arguments.database)
+    except DeadlineValidationError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+    except DatabaseError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 4
+
+    try:
+        _print_due_cases(due_cases(connection, as_of=as_of, within_hours=within_hours))
+        return 0
+    except DeadlineValidationError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+    except DeadlineError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 3
+    finally:
+        connection.close()
 
 
 def _print_vendor_list(vendors: tuple[Vendor, ...]) -> None:
@@ -560,6 +624,23 @@ def _print_case(case: RmaCase, events: tuple[CaseEvent, ...]) -> None:
             )
 
 
+def _print_due_cases(cases: tuple[DueCase, ...]) -> None:
+    print("TYPE\tSTATE\tDUE AT\tCASE\tASSET\tVENDOR")
+    for case in cases:
+        print(
+            "\t".join(
+                (
+                    case.deadline_type,
+                    case.state,
+                    case.deadline_at,
+                    case.reference,
+                    case.asset_tag,
+                    case.vendor_key,
+                )
+            )
+        )
+
+
 def _format_minutes(minutes: int | None) -> str:
     if minutes is None:
         return "-"
@@ -578,6 +659,24 @@ def _parse_as_of(value: str | None) -> date:
         return date.fromisoformat(value)
     except ValueError:
         raise AssetValidationError("as-of date must be an ISO calendar date") from None
+
+
+def _parse_due_window(value: str) -> int:
+    if not value.endswith("h"):
+        raise DeadlineValidationError("within must be a positive whole-hour value such as 48h")
+    try:
+        hours = int(value[:-1])
+    except ValueError:
+        raise DeadlineValidationError(
+            "within must be a positive whole-hour value such as 48h"
+        ) from None
+    if hours <= 0 or str(hours) != value[:-1]:
+        raise DeadlineValidationError("within must be a positive whole-hour value such as 48h")
+    return hours
+
+
+def _current_utc_timestamp() -> str:
+    return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def _format_date(value: date | None) -> str:
