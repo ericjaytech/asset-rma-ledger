@@ -464,6 +464,9 @@ def _utc_now() -> str:
 @contextmanager
 def _write_transaction(connection: sqlite3.Connection) -> Iterator[None]:
     """Commit one write operation in full or roll it back in full."""
+    if connection.in_transaction:
+        yield
+        return
     connection.execute("BEGIN IMMEDIATE")
     try:
         yield
