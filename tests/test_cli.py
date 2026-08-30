@@ -892,3 +892,46 @@ def test_import_case_command_reconstructs_a_snapshot(
     assert "Imported 1 cases rows." in captured.out
     assert "Status: outbound" in captured.out
     assert "outbound_dispatched" in captured.out
+
+
+def test_export_command_publishes_a_csv_bundle(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    database_path = tmp_path / "team-assets.db"
+    output = tmp_path / "ledger-export"
+    assert main(["--database", str(database_path), "init"]) == 0
+    assert (
+        main(
+            [
+                "--database",
+                str(database_path),
+                "vendor",
+                "add",
+                "--key",
+                "northstar",
+                "--name",
+                "Northstar Repairs",
+            ]
+        )
+        == 0
+    )
+
+    assert (
+        main(
+            [
+                "--database",
+                str(database_path),
+                "export",
+                "--output-dir",
+                str(output),
+                "--as-of",
+                "2026-08-30T18:00:00Z",
+            ]
+        )
+        == 0
+    )
+
+    captured = capsys.readouterr()
+    assert f"Exported ledger bundle: {output}" in captured.out
+    assert (output / "vendors.csv").is_file()
+    assert (output / "export_manifest.json").is_file()

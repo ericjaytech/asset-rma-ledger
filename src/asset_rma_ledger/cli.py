@@ -38,7 +38,14 @@ from .cases import (
     record_vendor_receipt,
     record_vendor_response,
 )
-from .csvio import CsvImportError, import_assets_csv, import_cases_csv, import_vendors_csv
+from .csvio import (
+    CsvExportError,
+    CsvImportError,
+    export_csv_bundle,
+    import_assets_csv,
+    import_cases_csv,
+    import_vendors_csv,
+)
 from .database import DatabaseError, connect_database, initialise_database
 from .deadlines import DeadlineError, DeadlineValidationError, DueCase, due_cases
 from .models import Asset, CaseEvent, RmaCase, Vendor
@@ -80,6 +87,14 @@ def build_parser() -> argparse.ArgumentParser:
         command.add_argument("path", type=Path, help="Canonical CSV input file.")
         command.add_argument("--dry-run", action="store_true", help="Validate then roll back.")
         command.add_argument("--by", required=True, help="Import operator alias.")
+
+    export_parser = commands.add_parser("export", help="Publish a local CSV ledger bundle.")
+    export_parser.add_argument(
+        "--output-dir", type=Path, required=True, help="New destination directory."
+    )
+    export_parser.add_argument(
+        "--as-of", help="UTC reference time for the exported 48-hour due view."
+    )
 
     due_parser = commands.add_parser(
         "due", help="List overdue and upcoming incomplete SLA deadlines."
@@ -303,6 +318,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if arguments.command == "import":
         return _run_import_command(arguments)
+
+    if arguments.command == "export":
+        return _run_export_command(arguments)
 
     if arguments.command == "due":
         return _run_due_command(arguments)
@@ -682,6 +700,23 @@ def _run_import_command(arguments: argparse.Namespace) -> int:
         connection.close()
     action = "Validated" if summary.dry_run else "Imported"
     print(f"{action} {summary.rows} {summary.kind} rows.")
+    return 0
+
+
+def _run_export_command(arguments: argparse.Namespace) -> int:
+    try:
+        connection = connect_database(arguments.database)
+    except DatabaseError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 4
+    try:
+        summary = export_csv_bundle(connection, arguments.output_dir, as_of=arguments.as_of)
+    except CsvExportError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+    finally:
+        connection.close()
+    print(f"Exported ledger bundle: {summary.output_dir}")
     return 0
 
 
