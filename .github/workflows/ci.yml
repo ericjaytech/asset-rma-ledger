@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    name: Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.14"]
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install development tools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --group dev
+
+      - name: Check formatting
+        run: python -m ruff format --check .
+
+      - name: Lint
+        run: python -m ruff check .
+
+      - name: Test
+        run: python -m pytest
+
+      - name: Build distributions
+        run: python -m build
+
+      - name: Check distribution contents
+        run: python tools/check_distribution.py dist/*
+
+      - name: Test installed wheel
+        run: |
+          python -m venv .release-smoke
+          .release-smoke/bin/python -m pip install --no-deps dist/*.whl
+          .release-smoke/bin/python -m pip check
+          .release-smoke/bin/asset-rma-ledger --version
+          .release-smoke/bin/asset-rma-ledger --database release-smoke.db init
+          .release-smoke/bin/asset-rma-ledger --database release-smoke.db verify
