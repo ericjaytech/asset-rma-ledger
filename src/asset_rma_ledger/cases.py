@@ -307,6 +307,53 @@ def receive_return(
     )
 
 
+def change_case_deadlines(
+    connection: sqlite3.Connection,
+    reference: str,
+    *,
+    at: str,
+    operator_alias: str,
+    reason: str,
+    response_due_at: str | None = None,
+    resolution_due_at: str | None = None,
+) -> RmaCase:
+    """Change one or both deadlines through an immutable reasoned event."""
+    if response_due_at is None and resolution_due_at is None:
+        raise CaseValidationError("at least one deadline value must be supplied")
+    case = get_case(connection, reference)
+    occurred_at = _parse_utc_timestamp(at, "at")
+    next_response_due = _parse_optional_utc_timestamp(response_due_at, "response due-at")
+    next_resolution_due = _parse_optional_utc_timestamp(resolution_due_at, "resolution due-at")
+    normalised_reason = _validate_required_text(reason, "reason", 500)
+    effective_response_due = (
+        next_response_due if response_due_at is not None else case.response_due_at
+    )
+    effective_resolution_due = (
+        next_resolution_due if resolution_due_at is not None else case.resolution_due_at
+    )
+    return _append_milestone(
+        connection,
+        case,
+        at=occurred_at,
+        operator_alias=operator_alias,
+        event_type="deadline_changed",
+        payload={
+            "previous_response_due_at": case.response_due_at,
+            "response_due_at": effective_response_due,
+            "previous_resolution_due_at": case.resolution_due_at,
+            "resolution_due_at": effective_resolution_due,
+            "reason": normalised_reason,
+        },
+        updates={
+            "response_due_at": effective_response_due,
+            "resolution_due_at": effective_resolution_due,
+        },
+        allowed_statuses=frozenset(
+            {"open", "authorised", "outbound", "with_vendor", "returning", "returned"}
+        ),
+    )
+
+
 def _append_milestone(
     connection: sqlite3.Connection,
     case: RmaCase,
