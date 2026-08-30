@@ -585,3 +585,193 @@ def test_case_deadline_and_due_commands_use_explicit_utc_time(
     captured = capsys.readouterr()
     assert "Changed case deadlines: RMA-2026-001" in captured.out
     assert "response\tdue_soon\t2026-08-30T12:00:00Z\tRMA-2026-001" in captured.out
+
+
+def test_case_outcome_correction_and_terminal_commands_append_history(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from asset_rma_ledger.cases import list_case_events
+    from asset_rma_ledger.database import connect_database
+
+    database_path = tmp_path / "team-assets.db"
+    assert main(["--database", str(database_path), "init"]) == 0
+    assert (
+        main(
+            [
+                "--database",
+                str(database_path),
+                "vendor",
+                "add",
+                "--key",
+                "northstar",
+                "--name",
+                "Northstar Repairs",
+            ]
+        )
+        == 0
+    )
+    for tag, serial in (("LAP-0042", "SN-A1B2C3"), ("LAP-0043", "SN-A1B2C4")):
+        assert (
+            main(
+                [
+                    "--database",
+                    str(database_path),
+                    "asset",
+                    "add",
+                    "--tag",
+                    tag,
+                    "--serial",
+                    serial,
+                    "--type",
+                    "laptop",
+                    "--manufacturer",
+                    "ExampleCo",
+                    "--model",
+                    "ProBook-14",
+                ]
+            )
+            == 0
+        )
+    for reference, tag in (("RMA-2026-001", "LAP-0042"), ("RMA-2026-002", "LAP-0043")):
+        assert (
+            main(
+                [
+                    "--database",
+                    str(database_path),
+                    "case",
+                    "open",
+                    "--case",
+                    reference,
+                    "--asset",
+                    tag,
+                    "--vendor",
+                    "northstar",
+                    "--opened-at",
+                    "2026-08-30T09:00:00Z",
+                    "--by",
+                    "ej",
+                ]
+            )
+            == 0
+        )
+
+    assert (
+        main(
+            [
+                "--database",
+                str(database_path),
+                "case",
+                "outcome",
+                "RMA-2026-001",
+                "--at",
+                "2026-08-30T10:00:00Z",
+                "--by",
+                "ej",
+                "--outcome",
+                "refund",
+            ]
+        )
+        == 0
+    )
+    assert (
+        main(
+            [
+                "--database",
+                str(database_path),
+                "case",
+                "note",
+                "RMA-2026-001",
+                "--at",
+                "2026-08-30T10:30:00Z",
+                "--by",
+                "ej",
+                "--note",
+                "Vendor confirmed that the device will not be returned.",
+            ]
+        )
+        == 0
+    )
+    connection = connect_database(database_path)
+    try:
+        outcome_event = list_case_events(connection, "RMA-2026-001")[1]
+    finally:
+        connection.close()
+    assert (
+        main(
+            [
+                "--database",
+                str(database_path),
+                "case",
+                "correct-outcome",
+                "RMA-2026-001",
+                "--at",
+                "2026-08-30T11:00:00Z",
+                "--by",
+                "ej",
+                "--original-event-id",
+                outcome_event.event_id,
+                "--outcome",
+                "written_off",
+                "--reason",
+                "Vendor corrected the proposed financial remedy.",
+            ]
+        )
+        == 0
+    )
+    assert (
+        main(
+            [
+                "--database",
+                str(database_path),
+                "case",
+                "close",
+                "RMA-2026-001",
+                "--at",
+                "2026-08-30T11:30:00Z",
+                "--by",
+                "ej",
+                "--asset-status",
+                "retired",
+            ]
+        )
+        == 0
+    )
+    assert (
+        main(
+            [
+                "--database",
+                str(database_path),
+                "case",
+                "cancel",
+                "RMA-2026-002",
+                "--at",
+                "2026-08-30T10:00:00Z",
+                "--by",
+                "ej",
+                "--reason",
+                "Vendor confirmed that a return is not required.",
+            ]
+        )
+        == 0
+    )
+    assert (
+        main(
+            [
+                "--database",
+                str(database_path),
+                "case",
+                "show",
+                "RMA-2026-001",
+                "--history",
+            ]
+        )
+        == 0
+    )
+
+    captured = capsys.readouterr()
+    assert "Recorded case outcome: RMA-2026-001" in captured.out
+    assert "Added case note: RMA-2026-001" in captured.out
+    assert "Corrected case outcome: RMA-2026-001" in captured.out
+    assert "Closed case: RMA-2026-001" in captured.out
+    assert "Cancelled case: RMA-2026-002" in captured.out
+    assert outcome_event.event_id in captured.out

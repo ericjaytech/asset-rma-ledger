@@ -22,14 +22,19 @@ from .assets import (
 from .cases import (
     CaseError,
     CaseValidationError,
+    add_case_note,
     authorise_case,
+    cancel_case,
     change_case_deadlines,
+    close_case,
+    correct_case_outcome,
     dispatch_case,
     dispatch_return,
     get_case,
     list_case_events,
     open_case,
     receive_return,
+    record_case_outcome,
     record_vendor_receipt,
     record_vendor_response,
 )
@@ -208,6 +213,54 @@ def build_parser() -> argparse.ArgumentParser:
     deadline_case_parser.add_argument(
         "--resolution-due-at", help="Replacement UTC resolution deadline."
     )
+
+    outcome_case_parser = case_commands.add_parser(
+        "outcome", help="Record the effective outcome before case closure."
+    )
+    _add_case_milestone_arguments(outcome_case_parser)
+    outcome_case_parser.add_argument("--outcome", required=True, help="Supported outcome label.")
+    outcome_case_parser.add_argument("--note", help="Optional explanatory or replacement note.")
+
+    note_case_parser = case_commands.add_parser(
+        "note", help="Append a bounded operational note to an active case."
+    )
+    _add_case_milestone_arguments(note_case_parser)
+    note_case_parser.add_argument(
+        "--note", required=True, help="Plain-text note, up to 2,000 characters."
+    )
+
+    correct_outcome_case_parser = case_commands.add_parser(
+        "correct-outcome", help="Correct a recorded outcome through an immutable event."
+    )
+    _add_case_milestone_arguments(correct_outcome_case_parser)
+    correct_outcome_case_parser.add_argument(
+        "--original-event-id",
+        required=True,
+        help="Outcome event UUID shown by case show --history.",
+    )
+    correct_outcome_case_parser.add_argument(
+        "--outcome", required=True, help="Replacement supported outcome label."
+    )
+    correct_outcome_case_parser.add_argument(
+        "--reason", required=True, help="Reason for the correction."
+    )
+    correct_outcome_case_parser.add_argument(
+        "--note", help="Optional explanatory or replacement note."
+    )
+
+    close_case_parser = case_commands.add_parser(
+        "close", help="Close a returned or documented exceptional case."
+    )
+    _add_case_milestone_arguments(close_case_parser)
+    close_case_parser.add_argument(
+        "--asset-status", help="Required final status for exceptional closure: in_stock or retired."
+    )
+
+    cancel_case_parser = case_commands.add_parser(
+        "cancel", help="Cancel a case before asset dispatch."
+    )
+    _add_case_milestone_arguments(cancel_case_parser)
+    cancel_case_parser.add_argument("--reason", required=True, help="Reason for cancellation.")
     return parser
 
 
@@ -497,6 +550,60 @@ def _run_case_command(arguments: argparse.Namespace) -> int:
             )
             print(f"Changed case deadlines: {case.reference}")
             return 0
+        if arguments.case_command == "outcome":
+            case = record_case_outcome(
+                connection,
+                arguments.reference,
+                at=arguments.at,
+                operator_alias=arguments.operator_alias,
+                outcome=arguments.outcome,
+                note=arguments.note,
+            )
+            print(f"Recorded case outcome: {case.reference}")
+            return 0
+        if arguments.case_command == "note":
+            case = add_case_note(
+                connection,
+                arguments.reference,
+                at=arguments.at,
+                operator_alias=arguments.operator_alias,
+                note=arguments.note,
+            )
+            print(f"Added case note: {case.reference}")
+            return 0
+        if arguments.case_command == "correct-outcome":
+            case = correct_case_outcome(
+                connection,
+                arguments.reference,
+                at=arguments.at,
+                operator_alias=arguments.operator_alias,
+                original_event_id=arguments.original_event_id,
+                outcome=arguments.outcome,
+                reason=arguments.reason,
+                note=arguments.note,
+            )
+            print(f"Corrected case outcome: {case.reference}")
+            return 0
+        if arguments.case_command == "close":
+            case = close_case(
+                connection,
+                arguments.reference,
+                at=arguments.at,
+                operator_alias=arguments.operator_alias,
+                asset_status=arguments.asset_status,
+            )
+            print(f"Closed case: {case.reference}")
+            return 0
+        if arguments.case_command == "cancel":
+            case = cancel_case(
+                connection,
+                arguments.reference,
+                at=arguments.at,
+                operator_alias=arguments.operator_alias,
+                reason=arguments.reason,
+            )
+            print(f"Cancelled case: {case.reference}")
+            return 0
     except CaseValidationError as error:
         print(f"error: {error}", file=sys.stderr)
         return 2
@@ -616,10 +723,17 @@ def _print_case(case: RmaCase, events: tuple[CaseEvent, ...]) -> None:
         print(f"{label}: {value}")
     if events:
         print("History:")
+        print("SEQUENCE\tTYPE\tOCCURRED AT\tBY\tEVENT ID")
         for event in events:
             print(
                 "\t".join(
-                    (str(event.sequence), event.event_type, event.occurred_at, event.operator_alias)
+                    (
+                        str(event.sequence),
+                        event.event_type,
+                        event.occurred_at,
+                        event.operator_alias,
+                        event.event_id,
+                    )
                 )
             )
 
