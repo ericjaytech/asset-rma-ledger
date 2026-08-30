@@ -18,14 +18,23 @@ FORBIDDEN_PARTS = {
     "dist",
     "fixtures",
 }
-FORBIDDEN_SUFFIXES = {
+FORBIDDEN_ENDINGS = (
     ".csv",
     ".db",
+    ".db-journal",
+    ".db-shm",
+    ".db-wal",
     ".sqlite",
+    ".sqlite-journal",
+    ".sqlite-shm",
+    ".sqlite-wal",
     ".sqlite3",
-}
+    ".sqlite3-journal",
+    ".sqlite3-shm",
+    ".sqlite3-wal",
+)
 FORBIDDEN_NAMES = {"export_manifest.json"}
-MACHINE_PATH_MARKERS = (b"/home/user/", b"C:\\Users\\")
+MACHINE_PATH_MARKERS = (b"/home/", b"/Users/", b":\\Users\\")
 
 
 def archive_members(path: Path) -> Iterable[tuple[str, bytes]]:
@@ -60,7 +69,7 @@ def check_archive(path: Path) -> None:
             raise ValueError(f"unsafe archive path in {path.name}: {name}")
         if FORBIDDEN_PARTS.intersection(member.parts):
             raise ValueError(f"forbidden archive path in {path.name}: {name}")
-        if member.name in FORBIDDEN_NAMES or member.suffix.casefold() in FORBIDDEN_SUFFIXES:
+        if member.name in FORBIDDEN_NAMES or member.name.casefold().endswith(FORBIDDEN_ENDINGS):
             raise ValueError(f"forbidden release artefact in {path.name}: {name}")
         if any(marker in content for marker in MACHINE_PATH_MARKERS):
             raise ValueError(f"machine-specific path in {path.name}: {name}")
