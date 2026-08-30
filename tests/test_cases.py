@@ -439,3 +439,210 @@ def test_outcome_operations_reject_invalid_or_ambiguous_mutations_without_histor
         "case_opened",
         "outcome_recorded",
     ]
+
+
+def test_close_case_completes_the_returned_workflow_after_an_outcome(connection) -> None:
+    from asset_rma_ledger.assets import get_asset
+    from asset_rma_ledger.cases import (
+        authorise_case,
+        close_case,
+        dispatch_case,
+        dispatch_return,
+        list_case_events,
+        open_case,
+        receive_return,
+        record_case_outcome,
+        record_vendor_receipt,
+    )
+
+    _register_vendor_and_asset(connection)
+    open_case(
+        connection,
+        reference="RMA-2026-001",
+        asset_tag="LAP-0042",
+        vendor_key="northstar",
+        opened_at="2026-08-30T09:00:00Z",
+        operator_alias="ej",
+    )
+    authorise_case(connection, "RMA-2026-001", at="2026-08-30T10:00:00Z", operator_alias="ej")
+    dispatch_case(
+        connection,
+        "RMA-2026-001",
+        at="2026-08-31T10:00:00Z",
+        operator_alias="ej",
+        carrier="Example Carrier",
+        tracking="TRACK-OUT-001",
+    )
+    record_vendor_receipt(
+        connection, "RMA-2026-001", at="2026-09-01T09:00:00Z", operator_alias="ej"
+    )
+    dispatch_return(
+        connection,
+        "RMA-2026-001",
+        at="2026-09-03T12:00:00Z",
+        operator_alias="ej",
+        carrier="Example Carrier",
+        tracking="TRACK-RETURN-001",
+    )
+    receive_return(connection, "RMA-2026-001", at="2026-09-04T09:00:00Z", operator_alias="ej")
+    record_case_outcome(
+        connection,
+        "RMA-2026-001",
+        at="2026-09-04T10:00:00Z",
+        operator_alias="ej",
+        outcome="repaired",
+    )
+
+    closed = close_case(connection, "RMA-2026-001", at="2026-09-04T11:00:00Z", operator_alias="ej")
+    event = list_case_events(connection, "RMA-2026-001")[-1]
+
+    assert closed.current_status == "closed"
+    assert closed.closed_at == "2026-09-04T11:00:00Z"
+    assert get_asset(connection, "LAP-0042").lifecycle_status == "in_stock"
+    assert event.event_type == "case_closed"
+    assert event.payload == {
+        "asset_status": "in_stock",
+        "closure_type": "returned",
+        "outcome": "repaired",
+    }
+
+
+def test_exceptional_close_and_pre_dispatch_cancellation_preserve_auditable_history(
+    connection,
+) -> None:
+    from asset_rma_ledger.assets import get_asset
+    from asset_rma_ledger.cases import (
+        cancel_case,
+        close_case,
+        list_case_events,
+        open_case,
+        record_case_outcome,
+    )
+
+    _register_vendor_and_asset(connection)
+    open_case(
+        connection,
+        reference="RMA-2026-001",
+        asset_tag="LAP-0042",
+        vendor_key="northstar",
+        opened_at="2026-08-30T09:00:00Z",
+        operator_alias="ej",
+    )
+    record_case_outcome(
+        connection,
+        "RMA-2026-001",
+        at="2026-08-30T10:00:00Z",
+        operator_alias="ej",
+        outcome="refund",
+    )
+
+    closed = close_case(
+        connection,
+        "RMA-2026-001",
+        at="2026-08-30T11:00:00Z",
+        operator_alias="ej",
+        asset_status="retired",
+    )
+    event = list_case_events(connection, "RMA-2026-001")[-1]
+
+    assert closed.current_status == "closed"
+    assert get_asset(connection, "LAP-0042").lifecycle_status == "retired"
+    assert event.payload == {
+        "asset_status": "retired",
+        "closure_type": "exceptional",
+        "outcome": "refund",
+    }
+
+    add_asset(
+        connection,
+        tag="LAP-0043",
+        serial="SN-A1B2C4",
+        asset_type="laptop",
+        manufacturer="ExampleCo",
+        model="ProBook-14",
+    )
+    open_case(
+        connection,
+        reference="RMA-2026-002",
+        asset_tag="LAP-0043",
+        vendor_key="northstar",
+        opened_at="2026-08-30T09:00:00Z",
+        operator_alias="ej",
+    )
+    cancelled = cancel_case(
+        connection,
+        "RMA-2026-002",
+        at="2026-08-30T10:00:00Z",
+        operator_alias="ej",
+        reason="Vendor confirmed that a return is not required.",
+    )
+
+    assert cancelled.current_status == "cancelled"
+    assert list_case_events(connection, "RMA-2026-002")[-1].payload == {
+        "reason": "Vendor confirmed that a return is not required."
+    }
+    assert get_asset(connection, "LAP-0043").lifecycle_status == "in_stock"
+
+
+def test_terminal_operations_reject_missing_outcomes_and_invalid_paths_without_mutation(
+    connection,
+) -> None:
+    from asset_rma_ledger.cases import (
+        CaseStateError,
+        CaseValidationError,
+        authorise_case,
+        cancel_case,
+        close_case,
+        dispatch_case,
+        list_case_events,
+        open_case,
+        record_case_outcome,
+    )
+
+    _register_vendor_and_asset(connection)
+    open_case(
+        connection,
+        reference="RMA-2026-001",
+        asset_tag="LAP-0042",
+        vendor_key="northstar",
+        opened_at="2026-08-30T09:00:00Z",
+        operator_alias="ej",
+    )
+
+    with pytest.raises(CaseStateError, match="an outcome must be recorded"):
+        close_case(connection, "RMA-2026-001", at="2026-08-30T10:00:00Z", operator_alias="ej")
+
+    record_case_outcome(
+        connection,
+        "RMA-2026-001",
+        at="2026-08-30T10:00:00Z",
+        operator_alias="ej",
+        outcome="refund",
+    )
+    with pytest.raises(CaseValidationError, match="asset status is required"):
+        close_case(connection, "RMA-2026-001", at="2026-08-30T11:00:00Z", operator_alias="ej")
+
+    authorise_case(connection, "RMA-2026-001", at="2026-08-30T11:00:00Z", operator_alias="ej")
+    dispatch_case(
+        connection,
+        "RMA-2026-001",
+        at="2026-08-31T10:00:00Z",
+        operator_alias="ej",
+        carrier="Example Carrier",
+        tracking="TRACK-OUT-001",
+    )
+    with pytest.raises(CaseStateError, match="requires authorised or open status"):
+        cancel_case(
+            connection,
+            "RMA-2026-001",
+            at="2026-08-31T11:00:00Z",
+            operator_alias="ej",
+            reason="Not permitted after dispatch.",
+        )
+
+    assert [event.event_type for event in list_case_events(connection, "RMA-2026-001")] == [
+        "case_opened",
+        "outcome_recorded",
+        "status_changed",
+        "outbound_dispatched",
+    ]

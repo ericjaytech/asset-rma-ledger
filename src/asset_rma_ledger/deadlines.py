@@ -64,6 +64,7 @@ def due_cases(
         FROM rma_cases
         JOIN assets ON assets.id = rma_cases.asset_id
         JOIN vendors ON vendors.id = rma_cases.vendor_id
+        WHERE rma_cases.current_status NOT IN ('closed', 'cancelled')
         ORDER BY rma_cases.case_reference_folded ASC
         """
     ).fetchall()

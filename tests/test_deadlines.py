@@ -188,3 +188,28 @@ def test_deadline_change_requires_a_value_and_reason_without_appending_an_event(
         )
 
     assert len(list_case_events(connection, "RMA-2026-001")) == 1
+
+
+def test_due_cases_excludes_cancelled_cases(connection) -> None:
+    from asset_rma_ledger.cases import cancel_case, open_case
+    from asset_rma_ledger.deadlines import due_cases
+
+    _register_vendor_and_assets(connection)
+    open_case(
+        connection,
+        reference="RMA-2026-001",
+        asset_tag="LAP-0042",
+        vendor_key="northstar",
+        opened_at="2026-08-30T09:00:00Z",
+        operator_alias="ej",
+        response_due_at="2026-08-30T10:00:00Z",
+    )
+    cancel_case(
+        connection,
+        "RMA-2026-001",
+        at="2026-08-30T09:30:00Z",
+        operator_alias="ej",
+        reason="Vendor confirmed that a return is not required.",
+    )
+
+    assert due_cases(connection, as_of="2026-08-30T11:00:00Z", within_hours=48) == ()

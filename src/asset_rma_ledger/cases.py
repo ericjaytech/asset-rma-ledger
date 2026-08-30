@@ -29,6 +29,8 @@ _OUTCOME_STATUSES = frozenset({"open", "authorised", "with_vendor", "returned"})
 _ACTIVE_CASE_STATUSES = frozenset(
     {"open", "authorised", "outbound", "with_vendor", "returning", "returned"}
 )
+_EXCEPTIONAL_OUTCOMES = frozenset({"refund", "repair_declined", "written_off", "other"})
+_EXCEPTIONAL_CLOSE_STATUSES = frozenset({"open", "authorised", "with_vendor"})
 
 
 class CaseError(RuntimeError):
@@ -464,6 +466,83 @@ def correct_case_outcome(
     )
 
 
+def close_case(
+    connection: sqlite3.Connection,
+    reference: str,
+    *,
+    at: str,
+    operator_alias: str,
+    asset_status: str | None = None,
+) -> RmaCase:
+    """Close a returned case or a documented exceptional case."""
+    case = get_case(connection, reference)
+    occurred_at = _parse_utc_timestamp(at, "at")
+    _require_outcome_present(case)
+    if case.current_status == "returned":
+        if asset_status is not None:
+            raise CaseValidationError("asset status is only valid for exceptional closure")
+        return _append_milestone(
+            connection,
+            case,
+            at=occurred_at,
+            operator_alias=operator_alias,
+            event_type="case_closed",
+            payload={
+                "asset_status": "in_stock",
+                "closure_type": "returned",
+                "outcome": case.current_outcome,
+            },
+            updates={"current_status": "closed", "closed_at": occurred_at},
+            allowed_statuses=frozenset({"returned"}),
+            additional_validation=_require_outcome_present,
+        )
+
+    if case.current_status not in _EXCEPTIONAL_CLOSE_STATUSES:
+        raise CaseStateError("case close requires returned or exceptional eligible status")
+    final_asset_status = _validate_exceptional_asset_status(asset_status)
+    _require_exceptional_outcome(case)
+    return _append_milestone(
+        connection,
+        case,
+        at=occurred_at,
+        operator_alias=operator_alias,
+        event_type="case_closed",
+        payload={
+            "asset_status": final_asset_status,
+            "closure_type": "exceptional",
+            "outcome": case.current_outcome,
+        },
+        updates={"current_status": "closed", "closed_at": occurred_at},
+        allowed_statuses=_EXCEPTIONAL_CLOSE_STATUSES,
+        asset_status_change=(_asset_status_before_exceptional_close(case), final_asset_status),
+        additional_validation=_require_exceptional_outcome,
+    )
+
+
+def cancel_case(
+    connection: sqlite3.Connection,
+    reference: str,
+    *,
+    at: str,
+    operator_alias: str,
+    reason: str,
+) -> RmaCase:
+    """Cancel a case before dispatch without altering its history."""
+    case = get_case(connection, reference)
+    occurred_at = _parse_utc_timestamp(at, "at")
+    normalised_reason = _validate_required_text(reason, "reason", 500)
+    return _append_milestone(
+        connection,
+        case,
+        at=occurred_at,
+        operator_alias=operator_alias,
+        event_type="case_cancelled",
+        payload={"reason": normalised_reason},
+        updates={"current_status": "cancelled"},
+        allowed_statuses=frozenset({"open", "authorised"}),
+    )
+
+
 def _append_milestone(
     connection: sqlite3.Connection,
     case: RmaCase,
@@ -642,6 +721,28 @@ def _require_outcome_absent(case: RmaCase) -> None:
 def _require_outcome_present(case: RmaCase) -> None:
     if case.current_outcome is None:
         raise CaseStateError("an outcome must be recorded before this operation")
+
+
+def _require_exceptional_outcome(case: RmaCase) -> None:
+    _require_outcome_present(case)
+    if case.current_outcome not in _EXCEPTIONAL_OUTCOMES:
+        allowed = ", ".join(sorted(_EXCEPTIONAL_OUTCOMES))
+        raise CaseStateError(f"exceptional closure requires one of: {allowed}")
+
+
+def _validate_exceptional_asset_status(value: str | None) -> str:
+    if value is None:
+        raise CaseValidationError("asset status is required for exceptional closure")
+    normalised = _validate_required_text(value, "asset status", 64)
+    if normalised not in {"in_stock", "retired"}:
+        raise CaseValidationError(
+            "asset status must be in_stock or retired for exceptional closure"
+        )
+    return normalised
+
+
+def _asset_status_before_exceptional_close(case: RmaCase) -> str:
+    return "in_rma" if case.current_status == "with_vendor" else "in_stock_or_deployed"
 
 
 def _validate_optional_text(value: str | None, label: str, maximum_length: int) -> str | None:
