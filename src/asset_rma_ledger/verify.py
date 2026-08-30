@@ -20,6 +20,42 @@ _OUTCOME_STATUSES = frozenset({"open", "authorised", "with_vendor", "returned"})
 _OUTCOMES = frozenset(
     {"repaired", "replaced", "refund", "no_fault_found", "repair_declined", "written_off", "other"}
 )
+_EXCEPTIONAL_OUTCOMES = frozenset({"refund", "repair_declined", "written_off", "other"})
+_EVENT_PAYLOAD_KEYS = {
+    "case_opened": (
+        frozenset({"asset_tag", "vendor_key", "response_due_at", "resolution_due_at"}),
+        frozenset({"source"}),
+    ),
+    "vendor_response_recorded": (frozenset({"vendor_reference"}), frozenset({"source"})),
+    "status_changed": (frozenset({"from_status", "to_status"}), frozenset({"source"})),
+    "outbound_dispatched": (frozenset({"carrier", "tracking"}), frozenset({"source"})),
+    "vendor_receipt_recorded": (frozenset(), frozenset({"source"})),
+    "return_dispatched": (frozenset({"carrier", "tracking"}), frozenset({"source"})),
+    "return_received": (frozenset(), frozenset({"source"})),
+    "deadline_changed": (
+        frozenset(
+            {
+                "previous_response_due_at",
+                "response_due_at",
+                "previous_resolution_due_at",
+                "resolution_due_at",
+                "reason",
+            }
+        ),
+        frozenset(),
+    ),
+    "outcome_recorded": (frozenset({"outcome"}), frozenset({"note", "source"})),
+    "note_added": (frozenset({"note"}), frozenset()),
+    "correction_recorded": (
+        frozenset({"field", "original_event_id", "previous_value", "replacement_value", "reason"}),
+        frozenset({"note"}),
+    ),
+    "case_closed": (
+        frozenset({"asset_status", "closure_type", "outcome"}),
+        frozenset({"source"}),
+    ),
+    "case_cancelled": (frozenset({"reason"}), frozenset({"source"})),
+}
 _PROJECTION_FIELDS = (
     "opened_at",
     "current_status",
@@ -215,6 +251,11 @@ def _replay_events(events: list[sqlite3.Row], payloads: list[dict[str, Any]]) ->
     opening = payloads[0]
     if first["event_type"] != "case_opened" or first["previous_hash"] != ZERO_EVENT_HASH:
         raise ValueError("invalid opening event")
+    _validate_payload("case_opened", opening)
+    _required_text(opening["asset_tag"])
+    _required_text(opening["vendor_key"])
+    _optional_timestamp(opening["response_due_at"])
+    _optional_timestamp(opening["resolution_due_at"])
     state = _Projection(
         opened_at=first["occurred_at"],
         current_status="open",
@@ -250,10 +291,12 @@ def _apply_event(
 ) -> None:
     event_type = event["event_type"]
     occurred_at = event["occurred_at"]
+    _validate_payload(event_type, payload)
     if event_type == "vendor_response_recorded":
         _require_status(state, _ACTIVE_STATUSES)
         if state.vendor_responded_at is not None:
             raise ValueError("duplicate response")
+        _optional_text(payload["vendor_reference"])
         state.vendor_responded_at = occurred_at
         state.vendor_reference = payload["vendor_reference"]
     elif event_type == "status_changed":
@@ -266,6 +309,7 @@ def _apply_event(
         state.current_status = "authorised"
     elif event_type == "outbound_dispatched":
         _require_status(state, frozenset({"authorised"}))
+        _validate_shipping_payload(payload)
         state.current_status = "outbound"
         state.outbound_dispatched_at = occurred_at
     elif event_type == "vendor_receipt_recorded":
@@ -274,6 +318,7 @@ def _apply_event(
         state.vendor_received_at = occurred_at
     elif event_type == "return_dispatched":
         _require_status(state, frozenset({"with_vendor"}))
+        _validate_shipping_payload(payload)
         state.current_status = "returning"
         state.return_dispatched_at = occurred_at
     elif event_type == "return_received":
@@ -282,6 +327,14 @@ def _apply_event(
         state.returned_at = occurred_at
     elif event_type == "deadline_changed":
         _require_status(state, _ACTIVE_STATUSES)
+        _required_text(payload["reason"])
+        for field in (
+            "previous_response_due_at",
+            "response_due_at",
+            "previous_resolution_due_at",
+            "resolution_due_at",
+        ):
+            _optional_timestamp(payload[field])
         if (
             payload["previous_response_due_at"] != state.response_due_at
             or payload["previous_resolution_due_at"] != state.resolution_due_at
@@ -294,11 +347,17 @@ def _apply_event(
         outcome = payload["outcome"]
         if state.current_outcome is not None or outcome not in _OUTCOMES:
             raise ValueError("invalid outcome")
+        note = payload.get("note")
+        if outcome == "other" and note is None:
+            raise ValueError("other outcome requires note")
+        _optional_text(note)
         state.current_outcome = outcome
         outcome_event_ids.add(event["event_id"])
     elif event_type == "correction_recorded":
         _require_status(state, _OUTCOME_STATUSES)
         replacement = payload["replacement_value"]
+        _required_text(payload["reason"])
+        _optional_text(payload.get("note"))
         if (
             payload["field"] != "outcome"
             or payload["original_event_id"] not in outcome_event_ids
@@ -310,22 +369,28 @@ def _apply_event(
         state.current_outcome = replacement
     elif event_type == "note_added":
         _require_status(state, _ACTIVE_STATUSES)
-        if not isinstance(payload["note"], str):
-            raise ValueError("invalid note")
+        _required_text(payload["note"])
     elif event_type == "case_closed":
         if state.current_outcome is None or payload["outcome"] != state.current_outcome:
             raise ValueError("invalid closure outcome")
         closure_type = payload["closure_type"]
         if closure_type == "returned":
             _require_status(state, frozenset({"returned"}))
+            if payload["asset_status"] != "in_stock":
+                raise ValueError("invalid returned asset status")
         elif closure_type == "exceptional":
             _require_status(state, frozenset({"open", "authorised", "with_vendor"}))
+            if state.current_outcome not in _EXCEPTIONAL_OUTCOMES or payload[
+                "asset_status"
+            ] not in {"in_stock", "retired"}:
+                raise ValueError("invalid exceptional closure")
         else:
             raise ValueError("invalid closure type")
         state.current_status = "closed"
         state.closed_at = occurred_at
     elif event_type == "case_cancelled":
         _require_status(state, frozenset({"open", "authorised"}))
+        _required_text(payload["reason"])
         state.current_status = "cancelled"
     else:
         raise ValueError("unsupported event type")
@@ -334,6 +399,44 @@ def _apply_event(
 def _require_status(state: _Projection, allowed: frozenset[str]) -> None:
     if state.current_status not in allowed:
         raise ValueError("invalid lifecycle status")
+
+
+def _validate_payload(event_type: str, payload: dict[str, Any]) -> None:
+    try:
+        required, optional = _EVENT_PAYLOAD_KEYS[event_type]
+    except KeyError:
+        raise ValueError("unsupported event type") from None
+    keys = frozenset(payload)
+    if not required.issubset(keys) or not keys.issubset(required | optional):
+        raise ValueError("invalid payload schema")
+    if "source" in payload and payload["source"] != "csv_import":
+        raise ValueError("invalid event source")
+
+
+def _validate_shipping_payload(payload: dict[str, Any]) -> None:
+    carrier = payload["carrier"]
+    tracking = payload["tracking"]
+    if payload.get("source") == "csv_import":
+        if carrier is not None or tracking is not None:
+            raise ValueError("imported shipping evidence must be absent")
+        return
+    _required_text(carrier)
+    _required_text(tracking)
+
+
+def _required_text(value: Any) -> None:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("required text is missing")
+
+
+def _optional_text(value: Any) -> None:
+    if value is not None:
+        _required_text(value)
+
+
+def _optional_timestamp(value: Any) -> None:
+    if value is not None:
+        _canonical_timestamp(value)
 
 
 def _canonical_timestamp(value: str) -> str:
