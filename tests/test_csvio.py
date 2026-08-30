@@ -174,7 +174,13 @@ def test_case_snapshot_import_rolls_back_all_rows_on_invalid_chronology(
 def test_export_bundle_writes_sorted_tables_and_verified_manifest(
     connection, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from asset_rma_ledger.cases import add_case_note, open_case
+    from asset_rma_ledger.cases import (
+        add_case_note,
+        correct_case_outcome,
+        list_case_events,
+        open_case,
+        record_case_outcome,
+    )
     from asset_rma_ledger.csvio import export_csv_bundle
 
     monkeypatch.setattr("asset_rma_ledger.csvio._utc_now", lambda: "2026-08-30T18:00:00Z")
@@ -206,6 +212,23 @@ def test_export_bundle_writes_sorted_tables_and_verified_manifest(
         operator_alias="ej",
         note="=not a spreadsheet instruction",
     )
+    record_case_outcome(
+        connection,
+        "RMA-2026-001",
+        at="2026-08-30T11:00:00Z",
+        operator_alias="ej",
+        outcome="repaired",
+    )
+    outcome_event = list_case_events(connection, "RMA-2026-001")[-1]
+    correct_case_outcome(
+        connection,
+        "RMA-2026-001",
+        at="2026-08-30T12:00:00Z",
+        operator_alias="ej",
+        original_event_id=outcome_event.event_id,
+        outcome="replaced",
+        reason="Vendor supplied a replacement",
+    )
     output = tmp_path / "ledger-export"
 
     summary = export_csv_bundle(connection, output, as_of="2026-08-30T18:00:00Z")
@@ -226,8 +249,16 @@ def test_export_bundle_writes_sorted_tables_and_verified_manifest(
     assert vendors[0]["name"].startswith("'=")
     with (output / "case_history.csv").open(encoding="utf-8", newline="") as source:
         history = list(csv.DictReader(source))
-    assert [row["event_type"] for row in history] == ["case_opened", "note_added"]
+    assert [row["event_type"] for row in history] == [
+        "case_opened",
+        "note_added",
+        "outcome_recorded",
+        "correction_recorded",
+    ]
     assert json.loads(history[1]["payload_json"])["note"].startswith("=")
+    correction = json.loads(history[3]["payload_json"])
+    assert correction["original_event_id"] == outcome_event.event_id
+    assert correction["replacement_value"] == "replaced"
     with (output / "due_cases.csv").open(encoding="utf-8", newline="") as source:
         due = list(csv.DictReader(source))
     assert [(row["deadline_type"], row["state"]) for row in due] == [
@@ -240,7 +271,7 @@ def test_export_bundle_writes_sorted_tables_and_verified_manifest(
     assert manifest["tool_version"] == "0.1.0a0"
     assert manifest["generated_at"] == "2026-08-30T18:00:00Z"
     assert manifest["database"] == "team-assets.db"
-    assert manifest["files"]["case_history.csv"]["rows"] == 2
+    assert manifest["files"]["case_history.csv"]["rows"] == 4
     for filename, details in manifest["files"].items():
         assert details["sha256"] == hashlib.sha256((output / filename).read_bytes()).hexdigest()
 
@@ -276,3 +307,10 @@ def test_export_bundle_removes_staging_data_after_a_write_failure(
 
     assert not output.exists()
     assert list(tmp_path.iterdir()) == [tmp_path / "team-assets.db"]
+
+
+@pytest.mark.parametrize("prefix", ["=", "+", "-", "@", "\t", "\r"])
+def test_export_escapes_every_spreadsheet_formula_prefix(prefix: str) -> None:
+    from asset_rma_ledger.csvio import _spreadsheet_safe
+
+    assert _spreadsheet_safe(prefix + "payload") == "'" + prefix + "payload"
