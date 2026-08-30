@@ -6,7 +6,7 @@ import json
 import re
 import sqlite3
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -22,6 +22,13 @@ from .vendors import (
 )
 
 _IDENTIFIER_PATTERN = re.compile(r"[A-Za-z0-9._-]{1,64}", flags=re.ASCII)
+_OUTCOMES = frozenset(
+    {"repaired", "replaced", "refund", "no_fault_found", "repair_declined", "written_off", "other"}
+)
+_OUTCOME_STATUSES = frozenset({"open", "authorised", "with_vendor", "returned"})
+_ACTIVE_CASE_STATUSES = frozenset(
+    {"open", "authorised", "outbound", "with_vendor", "returning", "returned"}
+)
 
 
 class CaseError(RuntimeError):
@@ -354,6 +361,109 @@ def change_case_deadlines(
     )
 
 
+def record_case_outcome(
+    connection: sqlite3.Connection,
+    reference: str,
+    *,
+    at: str,
+    operator_alias: str,
+    outcome: str,
+    note: str | None = None,
+) -> RmaCase:
+    """Record the effective outcome that must precede case closure."""
+    case = get_case(connection, reference)
+    occurred_at = _parse_utc_timestamp(at, "at")
+    normalised_outcome = _validate_outcome(outcome)
+    normalised_note = _validate_optional_text(note, "outcome note", 2000)
+    if normalised_outcome == "other" and normalised_note is None:
+        raise CaseValidationError("other outcome requires an explanatory note")
+    payload: dict[str, Any] = {"outcome": normalised_outcome}
+    if normalised_note is not None:
+        payload["note"] = normalised_note
+    return _append_milestone(
+        connection,
+        case,
+        at=occurred_at,
+        operator_alias=operator_alias,
+        event_type="outcome_recorded",
+        payload=payload,
+        updates={"current_outcome": normalised_outcome},
+        allowed_statuses=_OUTCOME_STATUSES,
+        additional_validation=_require_outcome_absent,
+    )
+
+
+def add_case_note(
+    connection: sqlite3.Connection,
+    reference: str,
+    *,
+    at: str,
+    operator_alias: str,
+    note: str,
+) -> RmaCase:
+    """Append a bounded operational note without changing case status."""
+    case = get_case(connection, reference)
+    occurred_at = _parse_utc_timestamp(at, "at")
+    normalised_note = _validate_required_text(note, "note", 2000)
+    return _append_milestone(
+        connection,
+        case,
+        at=occurred_at,
+        operator_alias=operator_alias,
+        event_type="note_added",
+        payload={"note": normalised_note},
+        updates={},
+        allowed_statuses=_ACTIVE_CASE_STATUSES,
+    )
+
+
+def correct_case_outcome(
+    connection: sqlite3.Connection,
+    reference: str,
+    *,
+    at: str,
+    operator_alias: str,
+    original_event_id: str,
+    outcome: str,
+    reason: str,
+    note: str | None = None,
+) -> RmaCase:
+    """Correct an outcome through a compensating immutable event."""
+    case = get_case(connection, reference)
+    occurred_at = _parse_utc_timestamp(at, "at")
+    normalised_event_id = _validate_required_text(original_event_id, "original event ID", 36)
+    normalised_outcome = _validate_outcome(outcome)
+    normalised_reason = _validate_required_text(reason, "reason", 500)
+    normalised_note = _validate_optional_text(note, "outcome note", 2000)
+    if normalised_outcome == "other" and normalised_note is None:
+        raise CaseValidationError("other outcome requires an explanatory note")
+    if case.current_outcome == normalised_outcome:
+        raise CaseValidationError("replacement outcome must differ from the current outcome")
+    original_event = _select_case_event(connection, case.id, normalised_event_id)
+    if original_event is None or original_event["event_type"] != "outcome_recorded":
+        raise CaseValidationError("original event ID must reference an outcome-recorded event")
+    payload: dict[str, Any] = {
+        "field": "outcome",
+        "original_event_id": normalised_event_id,
+        "previous_value": case.current_outcome,
+        "replacement_value": normalised_outcome,
+        "reason": normalised_reason,
+    }
+    if normalised_note is not None:
+        payload["note"] = normalised_note
+    return _append_milestone(
+        connection,
+        case,
+        at=occurred_at,
+        operator_alias=operator_alias,
+        event_type="correction_recorded",
+        payload=payload,
+        updates={"current_outcome": normalised_outcome},
+        allowed_statuses=_OUTCOME_STATUSES,
+        additional_validation=_require_outcome_present,
+    )
+
+
 def _append_milestone(
     connection: sqlite3.Connection,
     case: RmaCase,
@@ -365,12 +475,15 @@ def _append_milestone(
     updates: dict[str, str | int | None],
     allowed_statuses: frozenset[str],
     asset_status_change: tuple[str, str] | None = None,
+    additional_validation: Callable[[RmaCase], None] | None = None,
 ) -> RmaCase:
     """Append one lifecycle event and update the affected projections atomically."""
     alias = _validate_identifier(operator_alias, "operator alias")
     if case.current_status not in allowed_statuses:
         expected = " or ".join(sorted(allowed_statuses))
         raise CaseStateError(f"{event_type} requires {expected} status")
+    if additional_validation is not None:
+        additional_validation(case)
     _validate_event_time(connection, case.id, at)
 
     with _write_transaction(connection):
@@ -378,6 +491,8 @@ def _append_milestone(
         if current.current_status not in allowed_statuses:
             expected = " or ".join(sorted(allowed_statuses))
             raise CaseStateError(f"{event_type} requires {expected} status")
+        if additional_validation is not None:
+            additional_validation(current)
         _validate_event_time(connection, current.id, at)
         sequence, event_hash, recorded_at = _insert_case_event(
             connection,
@@ -511,6 +626,24 @@ def _validate_required_text(value: str, label: str, maximum_length: int) -> str:
     return normalised
 
 
+def _validate_outcome(value: str) -> str:
+    normalised = _validate_required_text(value, "outcome", 64)
+    if normalised not in _OUTCOMES:
+        choices = ", ".join(sorted(_OUTCOMES))
+        raise CaseValidationError(f"outcome must be one of: {choices}")
+    return normalised
+
+
+def _require_outcome_absent(case: RmaCase) -> None:
+    if case.current_outcome is not None:
+        raise CaseStateError("an outcome has already been recorded; use an outcome correction")
+
+
+def _require_outcome_present(case: RmaCase) -> None:
+    if case.current_outcome is None:
+        raise CaseStateError("an outcome must be recorded before this operation")
+
+
 def _validate_optional_text(value: str | None, label: str, maximum_length: int) -> str | None:
     if value is None:
         return None
@@ -611,6 +744,15 @@ def _select_case_by_reference(
 ) -> sqlite3.Row | None:
     return connection.execute(
         _CASE_SELECT + " WHERE rma_cases.case_reference_folded = ?", (folded_reference,)
+    ).fetchone()
+
+
+def _select_case_event(
+    connection: sqlite3.Connection, case_id: int, event_id: str
+) -> sqlite3.Row | None:
+    return connection.execute(
+        "SELECT event_id, event_type FROM case_events WHERE case_id = ? AND event_id = ?",
+        (case_id, event_id),
     ).fetchone()
 
 

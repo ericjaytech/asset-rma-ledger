@@ -311,3 +311,131 @@ def test_milestones_reject_invalid_transitions_and_empty_shipping_data_without_m
         "case_opened",
         "status_changed",
     ]
+
+
+def test_outcome_notes_and_outcome_correction_append_auditable_events(connection) -> None:
+    from asset_rma_ledger.cases import (
+        add_case_note,
+        correct_case_outcome,
+        list_case_events,
+        open_case,
+        record_case_outcome,
+    )
+
+    _register_vendor_and_asset(connection)
+    open_case(
+        connection,
+        reference="RMA-2026-001",
+        asset_tag="LAP-0042",
+        vendor_key="northstar",
+        opened_at="2026-08-30T09:00:00Z",
+        operator_alias="ej",
+    )
+
+    outcome = record_case_outcome(
+        connection,
+        "RMA-2026-001",
+        at="2026-08-30T10:00:00Z",
+        operator_alias="ej",
+        outcome="refund",
+    )
+    noted = add_case_note(
+        connection,
+        "RMA-2026-001",
+        at="2026-08-30T10:30:00Z",
+        operator_alias="ej",
+        note="Vendor confirmed that the device will not be returned.",
+    )
+    original_event = list_case_events(connection, "RMA-2026-001")[1]
+    corrected = correct_case_outcome(
+        connection,
+        "RMA-2026-001",
+        at="2026-08-30T11:00:00Z",
+        operator_alias="ej",
+        original_event_id=original_event.event_id,
+        outcome="written_off",
+        reason="Vendor corrected the proposed financial remedy.",
+    )
+    events = list_case_events(connection, "RMA-2026-001")
+
+    assert outcome.current_outcome == "refund"
+    assert noted.current_status == "open"
+    assert corrected.current_outcome == "written_off"
+    assert [event.event_type for event in events] == [
+        "case_opened",
+        "outcome_recorded",
+        "note_added",
+        "correction_recorded",
+    ]
+    assert events[2].payload == {"note": "Vendor confirmed that the device will not be returned."}
+    assert events[3].payload == {
+        "field": "outcome",
+        "original_event_id": original_event.event_id,
+        "previous_value": "refund",
+        "reason": "Vendor corrected the proposed financial remedy.",
+        "replacement_value": "written_off",
+    }
+
+
+def test_outcome_operations_reject_invalid_or_ambiguous_mutations_without_history_changes(
+    connection,
+) -> None:
+    from asset_rma_ledger.cases import (
+        CaseStateError,
+        CaseValidationError,
+        correct_case_outcome,
+        list_case_events,
+        open_case,
+        record_case_outcome,
+    )
+
+    _register_vendor_and_asset(connection)
+    open_case(
+        connection,
+        reference="RMA-2026-001",
+        asset_tag="LAP-0042",
+        vendor_key="northstar",
+        opened_at="2026-08-30T09:00:00Z",
+        operator_alias="ej",
+    )
+
+    with pytest.raises(CaseValidationError, match="explanatory note"):
+        record_case_outcome(
+            connection,
+            "RMA-2026-001",
+            at="2026-08-30T10:00:00Z",
+            operator_alias="ej",
+            outcome="other",
+        )
+
+    recorded = record_case_outcome(
+        connection,
+        "RMA-2026-001",
+        at="2026-08-30T10:00:00Z",
+        operator_alias="ej",
+        outcome="refund",
+    )
+    with pytest.raises(CaseStateError, match="already been recorded"):
+        record_case_outcome(
+            connection,
+            "RMA-2026-001",
+            at="2026-08-30T11:00:00Z",
+            operator_alias="ej",
+            outcome="written_off",
+        )
+    with pytest.raises(CaseValidationError, match="outcome-recorded event"):
+        correct_case_outcome(
+            connection,
+            "RMA-2026-001",
+            at="2026-08-30T11:00:00Z",
+            operator_alias="ej",
+            original_event_id=list_case_events(connection, "RMA-2026-001")[0].event_id,
+            outcome="written_off",
+            reason="Correction after case review.",
+        )
+
+    assert recorded.current_outcome == "refund"
+    assert [event.event_type for event in list_case_events(connection, "RMA-2026-001")] == [
+        "case_opened",
+        "outcome_recorded",
+    ]
