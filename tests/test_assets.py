@@ -87,6 +87,7 @@ def test_asset_identifiers_are_independently_case_insensitively_unique(connectio
             {"warranty_start": "2027-01-01", "warranty_end": "2026-12-31"},
             "must not precede",
         ),
+        ({"warranty_vendor": "not a key"}, "warranty vendor"),
         ({"lifecycle_status": "in_rma"}, "cannot be selected"),
     ],
 )
@@ -191,3 +192,40 @@ def test_edit_identify_and_retire_preserve_asset_invariants(connection) -> None:
     assert get_asset(connection, "LAP-0042") == retired
     with pytest.raises(AssetValidationError, match="retired asset"):
         edit_asset(connection, "LAP-0042", model="ProBook-16")
+
+
+def test_retire_asset_rejects_an_asset_with_an_active_rma_case(connection) -> None:
+    from asset_rma_ledger.assets import AssetValidationError, add_asset, retire_asset
+
+    vendor = add_vendor(connection, key="northstar", name="Northstar Repairs")
+    asset = add_asset(
+        connection,
+        tag="LAP-0042",
+        serial="SN-A1B2C3",
+        asset_type="laptop",
+        manufacturer="ExampleCo",
+        model="ProBook-14",
+    )
+    connection.execute(
+        """
+        INSERT INTO rma_cases (
+            case_reference, case_reference_folded, asset_id, vendor_id, opened_at,
+            current_status, last_event_sequence, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "RMA-2026-001",
+            "rma-2026-001",
+            asset.id,
+            vendor.id,
+            "2026-08-30T09:00:00Z",
+            "open",
+            0,
+            "2026-08-30T09:00:00Z",
+            "2026-08-30T09:00:00Z",
+        ),
+    )
+    connection.commit()
+
+    with pytest.raises(AssetValidationError, match="active RMA case"):
+        retire_asset(connection, asset.tag)

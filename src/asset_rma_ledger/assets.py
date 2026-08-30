@@ -9,7 +9,7 @@ from contextlib import contextmanager
 from datetime import UTC, date, datetime
 
 from .models import Asset
-from .vendors import VendorNotFoundError, get_vendor
+from .vendors import VendorError, VendorNotFoundError, get_vendor
 
 _IDENTIFIER_PATTERN = re.compile(r"[A-Za-z0-9._-]{1,64}", flags=re.ASCII)
 _LIFECYCLE_STATUSES = frozenset({"in_stock", "deployed", "retired"})
@@ -382,6 +382,8 @@ def _lookup_warranty_vendor_id(connection: sqlite3.Connection, key: str | None) 
         return get_vendor(connection, key).id
     except VendorNotFoundError:
         raise AssetValidationError(f"warranty vendor does not exist: {key.strip()}") from None
+    except VendorError:
+        raise AssetValidationError("warranty vendor is invalid") from None
 
 
 def _value_or_current(

@@ -110,3 +110,105 @@ def test_vendor_add_returns_invalid_argument_exit_code_for_bad_support_url(
     captured = capsys.readouterr()
     assert exit_code == 2
     assert "HTTPS" in captured.err
+
+
+def test_asset_commands_register_show_identify_retire_and_list_an_asset(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    database_path = tmp_path / "team-assets.db"
+    assert main(["--database", str(database_path), "init"]) == 0
+    capsys.readouterr()
+
+    assert (
+        main(
+            [
+                "--database",
+                str(database_path),
+                "asset",
+                "add",
+                "--tag",
+                "LAP-0042",
+                "--serial",
+                "SN-A1B2C3",
+                "--type",
+                "laptop",
+                "--manufacturer",
+                "ExampleCo",
+                "--model",
+                "ProBook-14",
+                "--warranty-start",
+                "2026-08-01",
+                "--warranty-end",
+                "2027-07-31",
+            ]
+        )
+        == 0
+    )
+    assert (
+        main(
+            [
+                "--database",
+                str(database_path),
+                "asset",
+                "identify",
+                "LAP-0042",
+                "--serial",
+                "SN-D4E5F6",
+            ]
+        )
+        == 0
+    )
+    assert (
+        main(
+            [
+                "--database",
+                str(database_path),
+                "asset",
+                "show",
+                "LAP-0042",
+                "--as-of",
+                "2026-08-30",
+            ]
+        )
+        == 0
+    )
+    assert main(["--database", str(database_path), "asset", "retire", "LAP-0042"]) == 0
+    assert main(["--database", str(database_path), "asset", "list"]) == 0
+
+    captured = capsys.readouterr()
+    assert "SN-D4E5F6" in captured.out
+    assert "Warranty status: active" in captured.out
+    assert "retired" in captured.out
+
+
+def test_asset_add_returns_invalid_argument_exit_code_for_in_rma_status(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    database_path = tmp_path / "team-assets.db"
+    assert main(["--database", str(database_path), "init"]) == 0
+    capsys.readouterr()
+
+    exit_code = main(
+        [
+            "--database",
+            str(database_path),
+            "asset",
+            "add",
+            "--tag",
+            "LAP-0042",
+            "--serial",
+            "SN-A1B2C3",
+            "--type",
+            "laptop",
+            "--manufacturer",
+            "ExampleCo",
+            "--model",
+            "ProBook-14",
+            "--status",
+            "in_rma",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 2
+    assert "cannot be selected" in captured.err

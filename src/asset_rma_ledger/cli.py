@@ -5,11 +5,22 @@ from __future__ import annotations
 import argparse
 import sys
 from collections.abc import Sequence
+from datetime import date
 from pathlib import Path
 
 from . import __version__
+from .assets import (
+    AssetError,
+    AssetValidationError,
+    add_asset,
+    edit_asset,
+    get_asset,
+    identify_asset,
+    list_assets,
+    retire_asset,
+)
 from .database import DatabaseError, connect_database, initialise_database
-from .models import Vendor
+from .models import Asset, Vendor
 from .vendors import (
     VendorError,
     VendorValidationError,
@@ -59,6 +70,49 @@ def build_parser() -> argparse.ArgumentParser:
         "deactivate", help="Deactivate a vendor without deleting it."
     )
     deactivate_vendor_parser.add_argument("key", help="Existing vendor key.")
+
+    asset_parser = commands.add_parser("asset", help="Manage asset records.")
+    asset_commands = asset_parser.add_subparsers(dest="asset_command", required=True)
+
+    add_asset_parser = asset_commands.add_parser("add", help="Register an asset.")
+    add_asset_parser.add_argument("--tag", required=True, help="Stable local asset tag.")
+    add_asset_parser.add_argument("--serial", required=True, help="Device serial number.")
+    add_asset_parser.add_argument(
+        "--type", dest="asset_type", required=True, help="Asset type label."
+    )
+    add_asset_parser.add_argument("--manufacturer", required=True, help="Asset manufacturer.")
+    add_asset_parser.add_argument("--model", required=True, help="Asset model name or number.")
+    add_asset_parser.add_argument(
+        "--status", default="in_stock", help="Initial status: in_stock, deployed or retired."
+    )
+    _add_asset_warranty_arguments(add_asset_parser)
+
+    edit_asset_parser = asset_commands.add_parser("edit", help="Update an asset's details.")
+    edit_asset_parser.add_argument("tag", help="Existing asset tag.")
+    edit_asset_parser.add_argument(
+        "--type", dest="asset_type", help="Replacement asset type label."
+    )
+    edit_asset_parser.add_argument("--manufacturer", help="Replacement manufacturer.")
+    edit_asset_parser.add_argument("--model", help="Replacement model name or number.")
+    _add_asset_warranty_arguments(edit_asset_parser)
+
+    identify_asset_parser = asset_commands.add_parser(
+        "identify", help="Correct an asset tag or serial number."
+    )
+    identify_asset_parser.add_argument("tag", help="Existing asset tag.")
+    identify_asset_parser.add_argument("--new-tag", help="Replacement asset tag.")
+    identify_asset_parser.add_argument("--serial", help="Replacement serial number.")
+
+    retire_asset_parser = asset_commands.add_parser(
+        "retire", help="Retire an asset that has no active RMA case."
+    )
+    retire_asset_parser.add_argument("tag", help="Existing asset tag.")
+    asset_commands.add_parser("list", help="List asset records.")
+    show_asset_parser = asset_commands.add_parser(
+        "show", help="Show an asset and its warranty state."
+    )
+    show_asset_parser.add_argument("tag", help="Existing asset tag.")
+    show_asset_parser.add_argument("--as-of", help="Warranty state date in YYYY-MM-DD format.")
     return parser
 
 
@@ -83,6 +137,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     if arguments.command == "vendor":
         return _run_vendor_command(arguments)
 
+    if arguments.command == "asset":
+        return _run_asset_command(arguments)
+
     parser.error(f"unsupported command: {arguments.command}")
     return 2
 
@@ -94,6 +151,13 @@ def _add_vendor_detail_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--account-reference", help="Local vendor account or contract reference.")
     parser.add_argument("--response-sla-hours", help="Default elapsed response SLA in hours.")
     parser.add_argument("--resolution-sla-hours", help="Default elapsed resolution SLA in hours.")
+
+
+def _add_asset_warranty_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--warranty-vendor", help="Existing vendor key for warranty support.")
+    parser.add_argument("--warranty-reference", help="Warranty or contract reference.")
+    parser.add_argument("--warranty-start", help="Warranty start date in YYYY-MM-DD format.")
+    parser.add_argument("--warranty-end", help="Warranty end date in YYYY-MM-DD format.")
 
 
 def _run_vendor_command(arguments: argparse.Namespace) -> int:
@@ -158,6 +222,72 @@ def _run_vendor_command(arguments: argparse.Namespace) -> int:
     raise AssertionError(f"unsupported vendor command: {arguments.vendor_command}")
 
 
+def _run_asset_command(arguments: argparse.Namespace) -> int:
+    try:
+        connection = connect_database(arguments.database)
+    except DatabaseError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 4
+
+    try:
+        if arguments.asset_command == "add":
+            asset = add_asset(
+                connection,
+                tag=arguments.tag,
+                serial=arguments.serial,
+                asset_type=arguments.asset_type,
+                manufacturer=arguments.manufacturer,
+                model=arguments.model,
+                lifecycle_status=arguments.status,
+                warranty_vendor=arguments.warranty_vendor,
+                warranty_reference=arguments.warranty_reference,
+                warranty_start=arguments.warranty_start,
+                warranty_end=arguments.warranty_end,
+            )
+            print(f"Added asset: {asset.tag}")
+            return 0
+        if arguments.asset_command == "edit":
+            asset = edit_asset(
+                connection,
+                arguments.tag,
+                asset_type=arguments.asset_type,
+                manufacturer=arguments.manufacturer,
+                model=arguments.model,
+                warranty_vendor=arguments.warranty_vendor,
+                warranty_reference=arguments.warranty_reference,
+                warranty_start=arguments.warranty_start,
+                warranty_end=arguments.warranty_end,
+            )
+            print(f"Updated asset: {asset.tag}")
+            return 0
+        if arguments.asset_command == "identify":
+            asset = identify_asset(
+                connection, arguments.tag, new_tag=arguments.new_tag, serial=arguments.serial
+            )
+            print(f"Updated asset identity: {asset.tag}")
+            return 0
+        if arguments.asset_command == "retire":
+            asset = retire_asset(connection, arguments.tag)
+            print(f"Retired asset: {asset.tag}")
+            return 0
+        if arguments.asset_command == "list":
+            _print_asset_list(list_assets(connection), as_of=date.today())
+            return 0
+        if arguments.asset_command == "show":
+            _print_asset(get_asset(connection, arguments.tag), _parse_as_of(arguments.as_of))
+            return 0
+    except AssetValidationError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+    except AssetError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 3
+    finally:
+        connection.close()
+
+    raise AssertionError(f"unsupported asset command: {arguments.asset_command}")
+
+
 def _print_vendor_list(vendors: tuple[Vendor, ...]) -> None:
     print("KEY\tSTATUS\tRESPONSE SLA\tRESOLUTION SLA\tNAME")
     for vendor in vendors:
@@ -190,6 +320,41 @@ def _print_vendor(vendor: Vendor) -> None:
         print(f"{label}: {value}")
 
 
+def _print_asset_list(assets: tuple[Asset, ...], *, as_of: date) -> None:
+    print("TAG\tSTATUS\tTYPE\tSERIAL\tWARRANTY\tMODEL")
+    for asset in assets:
+        print(
+            "\t".join(
+                (
+                    asset.tag,
+                    asset.lifecycle_status,
+                    asset.asset_type,
+                    asset.serial,
+                    asset.warranty_state(as_of),
+                    asset.model,
+                )
+            )
+        )
+
+
+def _print_asset(asset: Asset, as_of: date) -> None:
+    fields = (
+        ("Tag", asset.tag),
+        ("Serial", asset.serial),
+        ("Type", asset.asset_type),
+        ("Manufacturer", asset.manufacturer),
+        ("Model", asset.model),
+        ("Status", asset.lifecycle_status),
+        ("Warranty vendor", asset.warranty_vendor_key or "-"),
+        ("Warranty reference", asset.warranty_reference or "-"),
+        ("Warranty start", _format_date(asset.warranty_start)),
+        ("Warranty end", _format_date(asset.warranty_end)),
+        ("Warranty status", asset.warranty_state(as_of)),
+    )
+    for label, value in fields:
+        print(f"{label}: {value}")
+
+
 def _format_minutes(minutes: int | None) -> str:
     if minutes is None:
         return "-"
@@ -199,3 +364,16 @@ def _format_minutes(minutes: int | None) -> str:
     if hours:
         return f"{hours}h"
     return f"{remainder}m"
+
+
+def _parse_as_of(value: str | None) -> date:
+    if value is None:
+        return date.today()
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        raise AssetValidationError("as-of date must be an ISO calendar date") from None
+
+
+def _format_date(value: date | None) -> str:
+    return value.isoformat() if value is not None else "-"
