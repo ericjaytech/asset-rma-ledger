@@ -268,7 +268,7 @@ def test_export_bundle_writes_sorted_tables_and_verified_manifest(
 
     manifest = json.loads((output / "export_manifest.json").read_text(encoding="utf-8"))
     assert manifest["schema_version"] == 1
-    assert manifest["tool_version"] == "0.1.0a0"
+    assert manifest["tool_version"] == "0.1.0"
     assert manifest["generated_at"] == "2026-08-30T18:00:00Z"
     assert manifest["database"] == "team-assets.db"
     assert manifest["files"]["case_history.csv"]["rows"] == 4

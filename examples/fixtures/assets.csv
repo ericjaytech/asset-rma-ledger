@@ -1,0 +1,2 @@
+asset_tag,serial_number,asset_type,manufacturer,model,lifecycle_status,warranty_vendor,warranty_reference,warranty_start,warranty_end
+LAB-0042,SYNTH-A1B2C3,laptop,ExampleCo,ProBook-14,in_stock,northstar,SYNTH-WARRANTY-42,2026-01-01,2027-06-30

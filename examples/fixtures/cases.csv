@@ -1,0 +1,2 @@
+case_reference,asset_tag,vendor_key,opened_at,status,vendor_reference,response_due_at,resolution_due_at,vendor_responded_at,outbound_dispatched_at,vendor_received_at,return_dispatched_at,returned_at,outcome,closed_at
+RMA-DEMO-001,LAB-0042,northstar,2026-09-01T09:00:00Z,open,,2026-09-01T17:00:00Z,2026-09-06T09:00:00Z,,,,,,,
