@@ -212,3 +212,156 @@ def test_asset_add_returns_invalid_argument_exit_code_for_in_rma_status(
     captured = capsys.readouterr()
     assert exit_code == 2
     assert "cannot be selected" in captured.err
+
+
+def test_case_open_and_show_history_commands_create_an_auditable_case(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    database_path = tmp_path / "team-assets.db"
+    assert main(["--database", str(database_path), "init"]) == 0
+    assert (
+        main(
+            [
+                "--database",
+                str(database_path),
+                "vendor",
+                "add",
+                "--key",
+                "northstar",
+                "--name",
+                "Northstar Repairs",
+                "--response-sla-hours",
+                "8",
+            ]
+        )
+        == 0
+    )
+    assert (
+        main(
+            [
+                "--database",
+                str(database_path),
+                "asset",
+                "add",
+                "--tag",
+                "LAP-0042",
+                "--serial",
+                "SN-A1B2C3",
+                "--type",
+                "laptop",
+                "--manufacturer",
+                "ExampleCo",
+                "--model",
+                "ProBook-14",
+            ]
+        )
+        == 0
+    )
+
+    assert (
+        main(
+            [
+                "--database",
+                str(database_path),
+                "case",
+                "open",
+                "--case",
+                "RMA-2026-001",
+                "--asset",
+                "LAP-0042",
+                "--vendor",
+                "northstar",
+                "--opened-at",
+                "2026-08-30T09:00:00Z",
+                "--by",
+                "ej",
+            ]
+        )
+        == 0
+    )
+    assert (
+        main(
+            [
+                "--database",
+                str(database_path),
+                "case",
+                "show",
+                "RMA-2026-001",
+                "--history",
+            ]
+        )
+        == 0
+    )
+
+    captured = capsys.readouterr()
+    assert "Opened case: RMA-2026-001" in captured.out
+    assert "Response due: 2026-08-30T17:00:00Z" in captured.out
+    assert "History:" in captured.out
+    assert "1\tcase_opened\t2026-08-30T09:00:00Z\tej" in captured.out
+
+
+def test_case_open_returns_invalid_argument_exit_code_for_non_utc_open_time(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    database_path = tmp_path / "team-assets.db"
+    assert main(["--database", str(database_path), "init"]) == 0
+    assert (
+        main(
+            [
+                "--database",
+                str(database_path),
+                "vendor",
+                "add",
+                "--key",
+                "northstar",
+                "--name",
+                "Northstar Repairs",
+            ]
+        )
+        == 0
+    )
+    assert (
+        main(
+            [
+                "--database",
+                str(database_path),
+                "asset",
+                "add",
+                "--tag",
+                "LAP-0042",
+                "--serial",
+                "SN-A1B2C3",
+                "--type",
+                "laptop",
+                "--manufacturer",
+                "ExampleCo",
+                "--model",
+                "ProBook-14",
+            ]
+        )
+        == 0
+    )
+    capsys.readouterr()
+
+    exit_code = main(
+        [
+            "--database",
+            str(database_path),
+            "case",
+            "open",
+            "--case",
+            "RMA-2026-001",
+            "--asset",
+            "LAP-0042",
+            "--vendor",
+            "northstar",
+            "--opened-at",
+            "2026-08-30T09:00:00+01:00",
+            "--by",
+            "ej",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 2
+    assert "UTC RFC 3339" in captured.err

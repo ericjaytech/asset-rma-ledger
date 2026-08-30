@@ -19,8 +19,15 @@ from .assets import (
     list_assets,
     retire_asset,
 )
+from .cases import (
+    CaseError,
+    CaseValidationError,
+    get_case,
+    list_case_events,
+    open_case,
+)
 from .database import DatabaseError, connect_database, initialise_database
-from .models import Asset, Vendor
+from .models import Asset, CaseEvent, RmaCase, Vendor
 from .vendors import (
     VendorError,
     VendorValidationError,
@@ -113,6 +120,33 @@ def build_parser() -> argparse.ArgumentParser:
     )
     show_asset_parser.add_argument("tag", help="Existing asset tag.")
     show_asset_parser.add_argument("--as-of", help="Warranty state date in YYYY-MM-DD format.")
+
+    case_parser = commands.add_parser("case", help="Manage RMA cases and their history.")
+    case_commands = case_parser.add_subparsers(dest="case_command", required=True)
+    open_case_parser = case_commands.add_parser("open", help="Open an RMA case.")
+    open_case_parser.add_argument(
+        "--case", dest="case_reference", required=True, help="Case reference."
+    )
+    open_case_parser.add_argument(
+        "--asset", dest="asset_tag", required=True, help="Existing asset tag."
+    )
+    open_case_parser.add_argument(
+        "--vendor", dest="vendor_key", required=True, help="Active vendor key."
+    )
+    open_case_parser.add_argument(
+        "--opened-at", required=True, help="UTC RFC 3339 opening timestamp."
+    )
+    open_case_parser.add_argument(
+        "--by", dest="operator_alias", required=True, help="Operator alias."
+    )
+    open_case_parser.add_argument("--response-due-at", help="Explicit UTC response deadline.")
+    open_case_parser.add_argument("--resolution-due-at", help="Explicit UTC resolution deadline.")
+
+    show_case_parser = case_commands.add_parser("show", help="Show an RMA case.")
+    show_case_parser.add_argument("reference", help="Existing case reference.")
+    show_case_parser.add_argument(
+        "--history", action="store_true", help="Include immutable event history."
+    )
     return parser
 
 
@@ -139,6 +173,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if arguments.command == "asset":
         return _run_asset_command(arguments)
+
+    if arguments.command == "case":
+        return _run_case_command(arguments)
 
     parser.error(f"unsupported command: {arguments.command}")
     return 2
@@ -288,6 +325,44 @@ def _run_asset_command(arguments: argparse.Namespace) -> int:
     raise AssertionError(f"unsupported asset command: {arguments.asset_command}")
 
 
+def _run_case_command(arguments: argparse.Namespace) -> int:
+    try:
+        connection = connect_database(arguments.database)
+    except DatabaseError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 4
+
+    try:
+        if arguments.case_command == "open":
+            case = open_case(
+                connection,
+                reference=arguments.case_reference,
+                asset_tag=arguments.asset_tag,
+                vendor_key=arguments.vendor_key,
+                opened_at=arguments.opened_at,
+                operator_alias=arguments.operator_alias,
+                response_due_at=arguments.response_due_at,
+                resolution_due_at=arguments.resolution_due_at,
+            )
+            print(f"Opened case: {case.reference}")
+            return 0
+        if arguments.case_command == "show":
+            case = get_case(connection, arguments.reference)
+            events = list_case_events(connection, arguments.reference) if arguments.history else ()
+            _print_case(case, events)
+            return 0
+    except CaseValidationError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+    except CaseError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 3
+    finally:
+        connection.close()
+
+    raise AssertionError(f"unsupported case command: {arguments.case_command}")
+
+
 def _print_vendor_list(vendors: tuple[Vendor, ...]) -> None:
     print("KEY\tSTATUS\tRESPONSE SLA\tRESOLUTION SLA\tNAME")
     for vendor in vendors:
@@ -353,6 +428,29 @@ def _print_asset(asset: Asset, as_of: date) -> None:
     )
     for label, value in fields:
         print(f"{label}: {value}")
+
+
+def _print_case(case: RmaCase, events: tuple[CaseEvent, ...]) -> None:
+    fields = (
+        ("Reference", case.reference),
+        ("Asset", case.asset_tag),
+        ("Vendor", case.vendor_key),
+        ("Status", case.current_status),
+        ("Opened at", case.opened_at),
+        ("Response due", case.response_due_at or "-"),
+        ("Resolution due", case.resolution_due_at or "-"),
+        ("Last event", str(case.last_event_sequence)),
+    )
+    for label, value in fields:
+        print(f"{label}: {value}")
+    if events:
+        print("History:")
+        for event in events:
+            print(
+                "\t".join(
+                    (str(event.sequence), event.event_type, event.occurred_at, event.operator_alias)
+                )
+            )
 
 
 def _format_minutes(minutes: int | None) -> str:
