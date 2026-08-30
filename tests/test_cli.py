@@ -775,3 +775,38 @@ def test_case_outcome_correction_and_terminal_commands_append_history(
     assert "Closed case: RMA-2026-001" in captured.out
     assert "Cancelled case: RMA-2026-002" in captured.out
     assert outcome_event.event_id in captured.out
+
+
+def test_import_vendor_command_supports_dry_run(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    database_path = tmp_path / "team-assets.db"
+    source = tmp_path / "vendors.csv"
+    source.write_text(
+        "vendor_key,name,support_url,support_email,support_phone,account_reference,response_sla_hours,resolution_sla_hours,active\n"
+        "northstar,Northstar Repairs,,,,,8,120,true\n",
+        encoding="utf-8",
+    )
+    assert main(["--database", str(database_path), "init"]) == 0
+    assert (
+        main(
+            [
+                "--database",
+                str(database_path),
+                "import",
+                "vendors",
+                str(source),
+                "--by",
+                "ej",
+                "--dry-run",
+            ]
+        )
+        == 0
+    )
+    assert (
+        main(["--database", str(database_path), "import", "vendors", str(source), "--by", "ej"])
+        == 0
+    )
+    captured = capsys.readouterr()
+    assert "Validated 1 vendors rows." in captured.out
+    assert "Imported 1 vendors rows." in captured.out

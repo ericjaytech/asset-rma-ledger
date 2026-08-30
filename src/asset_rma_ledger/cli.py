@@ -38,6 +38,7 @@ from .cases import (
     record_vendor_receipt,
     record_vendor_response,
 )
+from .csvio import CsvImportError, import_assets_csv, import_vendors_csv
 from .database import DatabaseError, connect_database, initialise_database
 from .deadlines import DeadlineError, DeadlineValidationError, DueCase, due_cases
 from .models import Asset, CaseEvent, RmaCase, Vendor
@@ -67,6 +68,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("init", help="Create a new empty ledger database.")
+
+    import_parser = commands.add_parser("import", help="Import new canonical CSV records.")
+    import_commands = import_parser.add_subparsers(dest="import_command", required=True)
+    for name, help_text in (
+        ("vendors", "Import vendor records."),
+        ("assets", "Import asset records."),
+    ):
+        command = import_commands.add_parser(name, help=help_text)
+        command.add_argument("path", type=Path, help="Canonical CSV input file.")
+        command.add_argument("--dry-run", action="store_true", help="Validate then roll back.")
+        command.add_argument("--by", required=True, help="Import operator alias.")
 
     due_parser = commands.add_parser(
         "due", help="List overdue and upcoming incomplete SLA deadlines."
@@ -287,6 +299,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if arguments.command == "asset":
         return _run_asset_command(arguments)
+
+    if arguments.command == "import":
+        return _run_import_command(arguments)
 
     if arguments.command == "due":
         return _run_due_command(arguments)
@@ -639,6 +654,27 @@ def _run_due_command(arguments: argparse.Namespace) -> int:
         return 3
     finally:
         connection.close()
+
+
+def _run_import_command(arguments: argparse.Namespace) -> int:
+    try:
+        connection = connect_database(arguments.database)
+    except DatabaseError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 4
+    try:
+        if arguments.import_command == "vendors":
+            summary = import_vendors_csv(connection, arguments.path, dry_run=arguments.dry_run)
+        else:
+            summary = import_assets_csv(connection, arguments.path, dry_run=arguments.dry_run)
+    except CsvImportError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+    finally:
+        connection.close()
+    action = "Validated" if summary.dry_run else "Imported"
+    print(f"{action} {summary.rows} {summary.kind} rows.")
+    return 0
 
 
 def _print_vendor_list(vendors: tuple[Vendor, ...]) -> None:
