@@ -365,3 +365,118 @@ def test_case_open_returns_invalid_argument_exit_code_for_non_utc_open_time(
     captured = capsys.readouterr()
     assert exit_code == 2
     assert "UTC RFC 3339" in captured.err
+
+
+def test_case_lifecycle_commands_append_operational_history(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    database_path = tmp_path / "team-assets.db"
+    assert main(["--database", str(database_path), "init"]) == 0
+    assert (
+        main(
+            [
+                "--database",
+                str(database_path),
+                "vendor",
+                "add",
+                "--key",
+                "northstar",
+                "--name",
+                "Northstar Repairs",
+            ]
+        )
+        == 0
+    )
+    assert (
+        main(
+            [
+                "--database",
+                str(database_path),
+                "asset",
+                "add",
+                "--tag",
+                "LAP-0042",
+                "--serial",
+                "SN-A1B2C3",
+                "--type",
+                "laptop",
+                "--manufacturer",
+                "ExampleCo",
+                "--model",
+                "ProBook-14",
+            ]
+        )
+        == 0
+    )
+    assert (
+        main(
+            [
+                "--database",
+                str(database_path),
+                "case",
+                "open",
+                "--case",
+                "RMA-2026-001",
+                "--asset",
+                "LAP-0042",
+                "--vendor",
+                "northstar",
+                "--opened-at",
+                "2026-08-30T09:00:00Z",
+                "--by",
+                "ej",
+            ]
+        )
+        == 0
+    )
+
+    commands = (
+        ["vendor-response", "RMA-2026-001", "--at", "2026-08-30T09:30:00Z", "--by", "ej"],
+        ["authorise", "RMA-2026-001", "--at", "2026-08-30T10:00:00Z", "--by", "ej"],
+        [
+            "dispatch",
+            "RMA-2026-001",
+            "--at",
+            "2026-08-31T10:00:00Z",
+            "--by",
+            "ej",
+            "--carrier",
+            "Example Carrier",
+            "--tracking",
+            "TRACK-OUT-001",
+        ],
+        ["vendor-received", "RMA-2026-001", "--at", "2026-09-01T09:00:00Z", "--by", "ej"],
+        [
+            "return-dispatch",
+            "RMA-2026-001",
+            "--at",
+            "2026-09-03T12:00:00Z",
+            "--by",
+            "ej",
+            "--carrier",
+            "Example Carrier",
+            "--tracking",
+            "TRACK-RETURN-001",
+        ],
+        ["return-received", "RMA-2026-001", "--at", "2026-09-04T09:00:00Z", "--by", "ej"],
+    )
+    for command in commands:
+        assert main(["--database", str(database_path), "case", *command]) == 0
+
+    assert (
+        main(
+            [
+                "--database",
+                str(database_path),
+                "case",
+                "show",
+                "RMA-2026-001",
+                "--history",
+            ]
+        )
+        == 0
+    )
+
+    captured = capsys.readouterr()
+    assert "Status: returned" in captured.out
+    assert "7\treturn_received\t2026-09-04T09:00:00Z\tej" in captured.out

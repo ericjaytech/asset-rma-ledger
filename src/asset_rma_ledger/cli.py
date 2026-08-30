@@ -22,9 +22,15 @@ from .assets import (
 from .cases import (
     CaseError,
     CaseValidationError,
+    authorise_case,
+    dispatch_case,
+    dispatch_return,
     get_case,
     list_case_events,
     open_case,
+    receive_return,
+    record_vendor_receipt,
+    record_vendor_response,
 )
 from .database import DatabaseError, connect_database, initialise_database
 from .models import Asset, CaseEvent, RmaCase, Vendor
@@ -147,6 +153,37 @@ def build_parser() -> argparse.ArgumentParser:
     show_case_parser.add_argument(
         "--history", action="store_true", help="Include immutable event history."
     )
+
+    vendor_response_parser = case_commands.add_parser(
+        "vendor-response", help="Record the first response from the vendor."
+    )
+    _add_case_milestone_arguments(vendor_response_parser)
+    vendor_response_parser.add_argument("--vendor-reference", help="Vendor case reference.")
+
+    authorise_case_parser = case_commands.add_parser(
+        "authorise", help="Record vendor authorisation for the return."
+    )
+    _add_case_milestone_arguments(authorise_case_parser)
+
+    dispatch_case_parser = case_commands.add_parser(
+        "dispatch", help="Record outbound dispatch to the vendor."
+    )
+    _add_case_milestone_arguments(dispatch_case_parser, shipping=True)
+
+    vendor_received_parser = case_commands.add_parser(
+        "vendor-received", help="Record vendor receipt of the asset."
+    )
+    _add_case_milestone_arguments(vendor_received_parser)
+
+    return_dispatch_parser = case_commands.add_parser(
+        "return-dispatch", help="Record dispatch from the vendor."
+    )
+    _add_case_milestone_arguments(return_dispatch_parser, shipping=True)
+
+    return_received_parser = case_commands.add_parser(
+        "return-received", help="Record return receipt by the IT team."
+    )
+    _add_case_milestone_arguments(return_received_parser)
     return parser
 
 
@@ -195,6 +232,17 @@ def _add_asset_warranty_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--warranty-reference", help="Warranty or contract reference.")
     parser.add_argument("--warranty-start", help="Warranty start date in YYYY-MM-DD format.")
     parser.add_argument("--warranty-end", help="Warranty end date in YYYY-MM-DD format.")
+
+
+def _add_case_milestone_arguments(
+    parser: argparse.ArgumentParser, *, shipping: bool = False
+) -> None:
+    parser.add_argument("reference", help="Existing case reference.")
+    parser.add_argument("--at", required=True, help="UTC RFC 3339 milestone timestamp.")
+    parser.add_argument("--by", dest="operator_alias", required=True, help="Operator alias.")
+    if shipping:
+        parser.add_argument("--carrier", required=True, help="Shipping carrier.")
+        parser.add_argument("--tracking", required=True, help="Carrier tracking reference.")
 
 
 def _run_vendor_command(arguments: argparse.Namespace) -> int:
@@ -350,6 +398,65 @@ def _run_case_command(arguments: argparse.Namespace) -> int:
             case = get_case(connection, arguments.reference)
             events = list_case_events(connection, arguments.reference) if arguments.history else ()
             _print_case(case, events)
+            return 0
+        if arguments.case_command == "vendor-response":
+            case = record_vendor_response(
+                connection,
+                arguments.reference,
+                at=arguments.at,
+                operator_alias=arguments.operator_alias,
+                vendor_reference=arguments.vendor_reference,
+            )
+            print(f"Recorded vendor response: {case.reference}")
+            return 0
+        if arguments.case_command == "authorise":
+            case = authorise_case(
+                connection,
+                arguments.reference,
+                at=arguments.at,
+                operator_alias=arguments.operator_alias,
+            )
+            print(f"Authorised case: {case.reference}")
+            return 0
+        if arguments.case_command == "dispatch":
+            case = dispatch_case(
+                connection,
+                arguments.reference,
+                at=arguments.at,
+                operator_alias=arguments.operator_alias,
+                carrier=arguments.carrier,
+                tracking=arguments.tracking,
+            )
+            print(f"Dispatched case: {case.reference}")
+            return 0
+        if arguments.case_command == "vendor-received":
+            case = record_vendor_receipt(
+                connection,
+                arguments.reference,
+                at=arguments.at,
+                operator_alias=arguments.operator_alias,
+            )
+            print(f"Recorded vendor receipt: {case.reference}")
+            return 0
+        if arguments.case_command == "return-dispatch":
+            case = dispatch_return(
+                connection,
+                arguments.reference,
+                at=arguments.at,
+                operator_alias=arguments.operator_alias,
+                carrier=arguments.carrier,
+                tracking=arguments.tracking,
+            )
+            print(f"Recorded return dispatch: {case.reference}")
+            return 0
+        if arguments.case_command == "return-received":
+            case = receive_return(
+                connection,
+                arguments.reference,
+                at=arguments.at,
+                operator_alias=arguments.operator_alias,
+            )
+            print(f"Recorded return receipt: {case.reference}")
             return 0
     except CaseValidationError as error:
         print(f"error: {error}", file=sys.stderr)
