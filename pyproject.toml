@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "asset-rma-ledger"
-version = "0.1.0a0"
+version = "0.1.0"
 description = "Local asset-return and vendor RMA case tracking for small IT teams."
 readme = "README.md"
 requires-python = ">=3.11"

@@ -2,7 +2,7 @@
 
 All notable changes to Asset RMA Ledger are recorded here.
 
-## [0.1.0a0] - 2026-08-30
+## [0.1.0] - 2026-08-30
 
 Initial alpha release.
 

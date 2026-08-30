@@ -20,7 +20,7 @@
 
 Asset RMA Ledger is a local command-line application for tracking equipment sent to vendors for repair, replacement or assessment. It gives small IT teams a controlled RMA lifecycle, deadline reporting and an append-only case history without requiring a server or cloud account.
 
-Version `0.1.0a0` is an alpha release for evaluation and portfolio demonstrations. It stores operational records in one local SQLite database and has no runtime dependencies.
+Version `0.1.0` is an alpha release for evaluation and portfolio demonstrations. It stores operational records in one local SQLite database and has no runtime dependencies.
 
 ## What it does
 
@@ -32,6 +32,26 @@ Version `0.1.0a0` is an alpha release for evaluation and portfolio demonstration
 - Imports canonical CSV snapshots transactionally, with a full dry-run option.
 - Exports deterministic CSV tables and a checksum manifest.
 - Replays case history and verifies database, schema, event-chain and projection integrity.
+
+## Architecture and data flow
+
+```mermaid
+flowchart LR
+    O[Operator] --> C[argparse command layer]
+    F[Canonical CSV fixtures] --> I[Transactional import]
+    C --> D[Domain services]
+    I --> D
+    D --> S[(Local SQLite ledger)]
+    S --> Q[Due and case queries]
+    S --> V[Read-only integrity verification]
+    S --> E[Atomic CSV export]
+    E --> M[Checksum manifest]
+```
+
+The command layer validates operator input. Domain services enforce lifecycle
+rules and write the current projections plus append-only case events in one
+transaction. Reporting and verification remain read-only. Export stages a complete
+bundle before publishing it to a new directory.
 
 ## Requirements
 
@@ -46,8 +66,7 @@ Network shares and concurrent multi-user editing are not supported.
 Install the alpha release with `pipx`:
 
 ```bash
-pipx install \
-  https://github.com/ericjaytech/asset-rma-ledger/releases/download/v0.1.0a0/asset_rma_ledger-0.1.0a0-py3-none-any.whl
+pipx install "git+https://github.com/ericjaytech/asset-rma-ledger.git@v0.1.0"
 asset-rma-ledger --version
 ```
 
@@ -128,6 +147,20 @@ asset-rma-ledger --database demo-ledger.db due --within 48h \
 asset-rma-ledger --database demo-ledger.db verify
 ```
 
+Example terminal output from that synthetic workflow:
+
+```text
+Reference: RMA-DEMO-001
+Asset: LAB-0042
+Vendor: northstar
+Status: returned
+Opened at: 2026-09-01T09:00:00Z
+Response due: 2026-09-01T17:00:00Z
+Resolution due: 2026-09-06T09:00:00Z
+
+Verified ledger: 6 checks, 1 cases, 9 events.
+```
+
 ## CSV import and export
 
 Imports require exact canonical columns and create new records only. A dry run parses and validates the complete file inside a transaction, then rolls it back:
@@ -152,6 +185,9 @@ asset-rma-ledger --database demo-ledger.db export \
 
 See [Data model and file contracts](docs/data-model.md) for the lifecycle, canonical CSV columns and export contents.
 
+The repository includes small, invented import fixtures in `examples/fixtures/`.
+They contain no operational or employer data and are suitable for dry-run demos.
+
 ## Security and privacy boundary
 
 > [!WARNING]
@@ -171,6 +207,35 @@ asset-rma-ledger --database demo-ledger.db verify
 ```
 
 Verification is read-only. A failure exits with code `5` and identifies the failed check without printing event payload values.
+
+## Limitations
+
+- The ledger is local and single-user; network filesystems and concurrent writers
+  are unsupported.
+- Deadlines use elapsed hours, not business calendars, holidays or vendor opening
+  hours.
+- Hash chaining detects accidental history changes but is not a digital signature
+  and cannot defeat an attacker who controls both the database and application.
+- Imports create new records from exact canonical columns. They do not reconcile
+  arbitrary CMDB exports or import complete historical event streams.
+- The tool does not encrypt data, contact vendors, track parcels, overwrite files
+  or apply remediation.
+
+## Command and exit-code contract
+
+```bash
+asset-rma-ledger --help
+asset-rma-ledger --version
+asset-rma-ledger import vendors --help
+```
+
+| Exit code | Meaning |
+| --- | --- |
+| `0` | Command or dry-run completed |
+| `2` | Invalid argument, CSV contract or operation request |
+| `3` | Referenced domain record or transition was invalid |
+| `4` | Database or destination conflict |
+| `5` | Integrity verification failed |
 
 ## Development
 

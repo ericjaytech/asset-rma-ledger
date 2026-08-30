@@ -6,7 +6,7 @@ Asset RMA Ledger stores one schema-versioned SQLite database. Business identifie
 
 | Table | Purpose | Important constraints |
 | --- | --- | --- |
-| `schema_metadata` | Identifies the application and schema version. | Exactly one row; version `1` for `0.1.0a0`. |
+| `schema_metadata` | Identifies the application and schema version. | Exactly one row; schema version `1` for the `0.1.0` release. |
 | `vendors` | Vendor contacts and default elapsed-time SLA terms. | Unique folded vendor key; inactive records remain queryable. |
 | `assets` | Asset identity, model, lifecycle and warranty data. | Unique folded asset tag and serial number. |
 | `rma_cases` | Immutable case header and current-state projection. | Unique folded case reference; one non-terminal case per asset. |
